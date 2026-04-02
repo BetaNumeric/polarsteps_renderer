@@ -1,0 +1,1044 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Travel Data Visualizer</title>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Leaflet CSS & JS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    
+    <!-- html2canvas -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    
+    <style>
+        body { margin: 0; padding: 0; overflow: hidden; background: #1a1a1a; color: #e5e5e5; }
+        #root { height: 100vh; width: 100vw; display: flex; }
+        
+        /* Leaflet Overrides for Dark Mode integration */
+        .leaflet-container { background: #1a1a1a; font-family: 'Inter', sans-serif; }
+        .leaflet-popup-content-wrapper { background: #262626; color: #fff; border-radius: 8px; }
+        .leaflet-popup-tip { background: #262626; }
+        
+        /* Dynamic Tooltip Font Size */
+        .leaflet-tooltip {
+            font-size: var(--label-size, 12px) !important;
+            line-height: 1.2 !important;
+            white-space: nowrap;
+        }
+
+        /* Photo Marker Styles */
+        .photo-marker {
+            transition: transform 0.2s, width 0.2s, height 0.2s;
+            border-radius: 50%;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.5), 0 2px 4px -1px rgba(0, 0, 0, 0.3);
+            background-color: #333;
+        }
+        .photo-marker:hover {
+            transform: scale(1.2);
+            z-index: 1000 !important;
+            border-color: #3b82f6 !important;
+        }
+
+        /* Dual Range Slider Styles */
+        .range-slider-container {
+            position: relative;
+            height: 20px;
+            width: 100%;
+        }
+        .range-track {
+            position: absolute; top: 50%; transform: translateY(-50%); height: 4px; width: 100%; background-color: #374151; border-radius: 2px;
+        }
+        .range-highlight {
+            position: absolute; top: 50%; transform: translateY(-50%); height: 4px; background-color: #3b82f6; border-radius: 2px; z-index: 1;
+        }
+        .range-input {
+            position: absolute; top: 50%; transform: translateY(-50%); width: 100%; height: 20px; background: none; pointer-events: none; -webkit-appearance: none; z-index: 2; margin: 0;
+        }
+        .range-input::-webkit-slider-thumb {
+            -webkit-appearance: none; pointer-events: auto; width: 16px; height: 16px; border-radius: 50%; background: #fff; border: 2px solid #3b82f6; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+        }
+        .range-input::-moz-range-thumb {
+            pointer-events: auto; width: 16px; height: 16px; border-radius: 50%; background: #fff; border: 2px solid #3b82f6; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,0.3); border: none;
+        }
+
+        /* Crop Overlay Styles */
+        .crop-overlay {
+            position: absolute;
+            inset: 0;
+            pointer-events: none; /* Let clicks pass through to map */
+            z-index: 1000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .crop-frame {
+            position: relative;
+            border: 2px solid rgba(255, 255, 255, 0.8);
+            box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.7); /* The "Dim" effect */
+            transition: width 0.2s, height 0.2s;
+        }
+        .crop-frame::after {
+            content: 'Export Area';
+            position: absolute;
+            top: -24px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(255, 255, 255, 0.9);
+            color: #000;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: bold;
+            pointer-events: auto;
+        }
+        /* Loader */
+        .loader {
+            border: 4px solid #333; border-top: 4px solid #3b82f6; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // --- Math Helpers ---
+        const toRad = x => x * Math.PI / 180;
+        const toDeg = x => x * 180 / Math.PI;
+
+        const getHaversineDistance = (pt1, pt2) => {
+            const R = 6371; 
+            const dLat = toRad(pt2.lat - pt1.lat);
+            const dLon = toRad(pt2.lon - pt1.lon);
+            const a = Math.sin(dLat/2) * Math.sin(dLat/2) + Math.cos(toRad(pt1.lat)) * Math.cos(toRad(pt2.lat)) * Math.sin(dLon/2) * Math.sin(dLon/2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            return R * c;
+        };
+
+        const getGreatCirclePoints = (start, end, numPoints = 50) => {
+            const lat1 = toRad(start.lat); const lon1 = toRad(start.lon);
+            const lat2 = toRad(end.lat); const lon2 = toRad(end.lon);
+            const d = 2 * Math.asin(Math.sqrt(Math.pow(Math.sin((lat1 - lat2) / 2), 2) + Math.cos(lat1) * Math.cos(lat2) * Math.pow(Math.sin((lon1 - lon2) / 2), 2)));
+            if (d === 0) return [[start.lat, start.lon]];
+            const points = [];
+            for (let i = 0; i <= numPoints; i++) {
+                const f = i / numPoints;
+                const A = Math.sin((1 - f) * d) / Math.sin(d);
+                const B = Math.sin(f * d) / Math.sin(d);
+                const x = A * Math.cos(lat1) * Math.cos(lon1) + B * Math.cos(lat2) * Math.cos(lon2);
+                const y = A * Math.cos(lat1) * Math.sin(lon1) + B * Math.cos(lat2) * Math.sin(lon2);
+                const z = A * Math.sin(lat1) + B * Math.sin(lat2);
+                const lat = Math.atan2(z, Math.sqrt(x * x + y * y));
+                const lon = Math.atan2(y, x);
+                points.push([toDeg(lat), toDeg(lon)]);
+            }
+            return points;
+        };
+
+        const getAspectRatio = (format) => {
+            switch (format) {
+                case 'a4_land': return 297 / 210;
+                case 'a4_port': return 210 / 297;
+                case 'poster': return 3 / 2;
+                case 'square': return 1;
+                case '16_9': return 16 / 9;
+                default: return null;
+            }
+        };
+
+        const getLocationBounds = (locations = []) => {
+            const points = locations
+                .filter((location) => Number.isFinite(location?.lat) && Number.isFinite(location?.lon))
+                .map((location) => [location.lat, location.lon]);
+            return points.length ? L.latLngBounds(points) : null;
+        };
+
+        const revokePhotoUrls = (photoMap = {}) => {
+            Object.values(photoMap).flat().forEach((url) => URL.revokeObjectURL(url));
+        };
+
+        const fitMapToBounds = (map, bounds, options = {}) => new Promise((resolve) => {
+            if (!map || !bounds?.isValid?.()) {
+                resolve();
+                return;
+            }
+
+            let settled = false;
+            const finish = () => {
+                if (settled) return;
+                settled = true;
+                map.off('moveend', finish);
+                resolve();
+            };
+
+            map.on('moveend', finish);
+            map.fitBounds(bounds, options);
+            setTimeout(finish, 0);
+        });
+
+        const waitForTileLayer = (layer, timeout = 4000) => new Promise((resolve) => {
+            if (!layer) {
+                resolve();
+                return;
+            }
+
+            let settled = false;
+            const finish = () => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                layer.off('load', finish);
+                resolve();
+            };
+
+            const timer = setTimeout(finish, timeout);
+            layer.on('load', finish);
+
+            requestAnimationFrame(() => {
+                if (!layer._loading) finish();
+            });
+        });
+
+        // --- Icons ---
+        const Icon = ({ name, size = 20, className }) => {
+            const icons = {
+                upload: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>,
+                map: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"/><line x1="8" y1="2" x2="8" y2="18"/><line x1="16" y1="6" x2="16" y2="22"/></svg>,
+                image: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>,
+                settings: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>,
+                download: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>,
+                chevronDown: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9"/></svg>,
+                clock: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>,
+                rotateCcw: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 12" /><path d="M3 3v9h9" /></svg>,
+                plane: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M2 12h20"/><path d="M13 2l9 10-9 10"/><path d="M2 12l5-5m0 10l-5-5"/></svg>,
+                crop: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6.13 1L6 16a2 2 0 0 0 2 2h15" /><path d="M1 6.13L16 6a2 2 0 0 1 2 2v15" /></svg>
+            };
+            return <span className={className}>{icons[name] || icons.map}</span>;
+        };
+
+        // --- Reusable Components ---
+        const Accordion = ({ title, icon, children, isOpen, onClick }) => (
+            <div className="border-b border-gray-700">
+                <button onClick={onClick} className="w-full flex items-center justify-between p-4 bg-gray-800 hover:bg-gray-700 transition-colors text-left">
+                    <div className="flex items-center gap-2 font-medium text-gray-200"><Icon name={icon} size={18} />{title}</div>
+                    <div className={`transition-transform ${isOpen ? 'rotate-180' : ''}`}><Icon name="chevronDown" size={16} /></div>
+                </button>
+                {isOpen && <div className="p-4 bg-gray-900 space-y-4">{children}</div>}
+            </div>
+        );
+
+        const ControlGroup = ({ label, children }) => (
+            <div className="space-y-1">
+                <label className="text-xs uppercase tracking-wider text-gray-500 font-semibold">{label}</label>
+                {children}
+            </div>
+        );
+
+        const ColorPicker = ({ label, value, onChange }) => (
+            <div className="flex items-center justify-between">
+                <span className="text-sm text-gray-400">{label}</span>
+                <div className="flex items-center gap-2">
+                    <input type="color" value={value} onChange={(e) => onChange(e.target.value)} className="w-8 h-8 rounded cursor-pointer bg-transparent border-none" />
+                    <span className="text-xs font-mono text-gray-500">{value}</span>
+                </div>
+            </div>
+        );
+
+        const Slider = ({ label, value, min, max, step, onChange, unit = '' }) => (
+            <div className="space-y-1">
+                <div className="flex justify-between text-sm">
+                    <span className="text-gray-400">{label}</span>
+                    <span className="text-gray-500">{value}{unit}</span>
+                </div>
+                <input type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(parseFloat(e.target.value))} className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-500" />
+            </div>
+        );
+
+        const DualRangeSlider = ({ min, max, values, onChange }) => {
+            const [minVal, maxVal] = values;
+            const minPercent = Math.round(((minVal - min) / (max - min)) * 100);
+            const maxPercent = Math.round(((maxVal - min) / (max - min)) * 100);
+
+            const handleMinChange = (e) => onChange([Math.min(Number(e.target.value), maxVal - 1), maxVal]);
+            const handleMaxChange = (e) => onChange([minVal, Math.max(Number(e.target.value), minVal + 1)]);
+            
+            const handleMinInputChange = (e) => {
+                let val = parseInt(e.target.value);
+                if (isNaN(val)) return;
+                onChange([Math.max(min, Math.min(val, maxVal - 1)), maxVal]);
+            };
+
+            const handleMaxInputChange = (e) => {
+                let val = parseInt(e.target.value);
+                if (isNaN(val)) return;
+                onChange([minVal, Math.min(max, Math.max(val, minVal + 1))]);
+            };
+
+            return (
+                <div className="py-2 space-y-2">
+                    <div className="flex justify-between text-xs text-gray-400">
+                        <div className="flex flex-col gap-1">
+                            <span className="text-[10px] uppercase text-gray-500">Start</span>
+                            <input type="number" value={minVal} onChange={handleMinInputChange} className="w-20 bg-gray-700 border border-gray-600 rounded px-2 py-1 text-center text-white focus:border-blue-500 outline-none" />
+                        </div>
+                        <div className="flex flex-col gap-1 items-end">
+                            <span className="text-[10px] uppercase text-gray-500">End</span>
+                            <input type="number" value={maxVal} onChange={handleMaxInputChange} className="w-20 bg-gray-700 border border-gray-600 rounded px-2 py-1 text-center text-white focus:border-blue-500 outline-none" />
+                        </div>
+                    </div>
+                    <div className="range-slider-container mt-2">
+                        <div className="range-track"></div>
+                        <div className="range-highlight" style={{ left: `${minPercent}%`, width: `${maxPercent - minPercent}%` }}></div>
+                        <input type="range" min={min} max={max} value={minVal} onChange={handleMinChange} className="range-input" />
+                        <input type="range" min={min} max={max} value={maxVal} onChange={handleMaxChange} className="range-input" />
+                    </div>
+                </div>
+            );
+        };
+
+        // --- Main App ---
+        const App = () => {
+            const [tripData, setTripData] = useState(null);
+            const [locationsData, setLocationsData] = useState(null);
+            const [photos, setPhotos] = useState({}); 
+            const [loading, setLoading] = useState(false);
+            const [error, setError] = useState(null);
+
+            const [timeline, setTimeline] = useState([0, 100]); 
+            const [totalPoints, setTotalPoints] = useState(100);
+            const [openAccordion, setOpenAccordion] = useState('style');
+            
+            const [cropBox, setCropBox] = useState({ width: 0, height: 0 });
+
+            const initialConfig = {
+                // Map
+                tileProvider: 'carto_light', 
+                mapLabels: true, 
+                mapOpacity: 1,
+                mapSaturation: 100, 
+                mapContrast: 100, 
+                
+                // Route
+                routeColor: '#3b82f6',
+                routeWidth: 3,
+                routeOpacity: 0.8,
+                
+                // Flights
+                detectFlights: true,
+                flightThreshold: 500, // km
+                flightColor: '#f97316', 
+                flightOpacity: 0.8,
+                
+                // Steps
+                showSteps: false,
+                stepColor: '#ef4444',
+                stepRadius: 4,
+                stepOpacity: 1,
+                showStepLabels: true,
+                stepLabelSize: 12,
+
+                // Photos
+                showPhotos: true, 
+                photoMarkerSize: 50,
+
+                // Export
+                exportFormat: 'screen',
+                exportResolution: 'screen', // 'screen', 2048, 3840, custom
+                customExportWidth: 5000,
+                
+                // Crop
+                cropEnabled: false,
+                cropRatio: 'a4_land',
+                cropScale: 0.8,
+            };
+
+            const [config, setConfig] = useState(initialConfig);
+
+            const mapRef = useRef(null);
+            const mapInstanceRef = useRef(null);
+            const routeLayerRef = useRef(null);
+            const flightLayerRef = useRef(null);
+            const markerLayerRef = useRef(null);
+            const tileLayerRef = useRef(null);
+            const canvasRendererRef = useRef(null);
+            const cropFrameRef = useRef(null); 
+            const photosRef = useRef({});
+            const hasAutoFitRef = useRef(false);
+
+            // Update CSS Variable for Tooltips
+            useEffect(() => {
+                const mapContainer = document.getElementById('map-container');
+                if (mapContainer) {
+                    mapContainer.style.setProperty('--label-size', `${config.stepLabelSize}px`);
+                }
+            }, [config.stepLabelSize]);
+
+            useEffect(() => {
+                photosRef.current = photos;
+            }, [photos]);
+
+            useEffect(() => () => {
+                revokePhotoUrls(photosRef.current);
+            }, []);
+
+            const clearRenderedData = () => {
+                routeLayerRef.current?.clearLayers();
+                flightLayerRef.current?.clearLayers();
+                markerLayerRef.current?.clearLayers();
+            };
+
+            const resetTrip = () => {
+                revokePhotoUrls(photosRef.current);
+                photosRef.current = {};
+                clearRenderedData();
+                hasAutoFitRef.current = false;
+                setTripData(null);
+                setLocationsData(null);
+                setPhotos({});
+                setTimeline([0, 100]);
+                setTotalPoints(100);
+                setError(null);
+                setLoading(false);
+                setOpenAccordion('style');
+
+                if (mapInstanceRef.current) {
+                    mapInstanceRef.current.setView([0, 0], 2, { animate: false });
+                }
+            };
+
+            // --- Handlers ---
+            const handleFiles = async (files) => {
+                setLoading(true);
+                setError(null);
+                
+                const newPhotos = {};
+                let foundTrip = null;
+                let foundLocations = null;
+
+                try {
+                    const fileList = Array.from(files);
+                    for (const file of fileList) {
+                        if (file.name === 'trip.json' || file.name.endsWith('/trip.json')) {
+                            const text = await file.text();
+                            foundTrip = JSON.parse(text);
+                        } else if (file.name === 'locations.json' || file.name.endsWith('/locations.json')) {
+                            const text = await file.text();
+                            foundLocations = JSON.parse(text);
+                        }
+                    }
+
+                    if (!foundTrip) throw new Error("Could not find 'trip.json'.");
+                    if (!foundLocations) throw new Error("Could not find 'locations.json'.");
+
+                    const allSteps = Array.isArray(foundTrip.all_steps) ? foundTrip.all_steps : [];
+                    const sortedLocations = Array.isArray(foundLocations.locations)
+                        ? [...foundLocations.locations].sort((a, b) => a.time - b.time)
+                        : [];
+
+                    if (sortedLocations.length === 0) throw new Error("No locations found in 'locations.json'.");
+
+                    const nextTripData = { ...foundTrip, all_steps: allSteps };
+                    const nextLocationsData = { ...foundLocations, locations: sortedLocations };
+
+                    const validStepIds = new Set(allSteps.map(step => step.id));
+                    
+                    for (const file of fileList) {
+                        if (file.type.startsWith('image/')) {
+                            const path = file.webkitRelativePath || file.name;
+                            const numbersInPath = path.match(/(\d+)/g);
+                            if (numbersInPath) {
+                                const matchingStepId = numbersInPath.find(num => validStepIds.has(parseInt(num)));
+                                if (matchingStepId) {
+                                    const stepId = parseInt(matchingStepId);
+                                    if (!newPhotos[stepId]) newPhotos[stepId] = [];
+                                    newPhotos[stepId].push(URL.createObjectURL(file));
+                                }
+                            }
+                        }
+                    }
+
+                    revokePhotoUrls(photosRef.current);
+                    photosRef.current = newPhotos;
+                    hasAutoFitRef.current = false;
+                    setTripData(nextTripData);
+                    setLocationsData(nextLocationsData);
+                    setPhotos(newPhotos);
+                    
+                    setTotalPoints(sortedLocations.length);
+                    setTimeline([0, sortedLocations.length]);
+                    setOpenAccordion('style');
+                } catch (err) {
+                    revokePhotoUrls(newPhotos);
+                    setError(err.message);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const handleFolderSelect = (e) => handleFiles(e.target.files);
+
+            // --- Map Logic ---
+            useEffect(() => {
+                if (!mapInstanceRef.current && mapRef.current) {
+                    const map = L.map(mapRef.current, {
+                        zoomControl: false,
+                        attributionControl: false,
+                        preferCanvas: true 
+                    }).setView([0, 0], 2);
+                    
+                    canvasRendererRef.current = L.canvas({ padding: 0.5 });
+                    mapInstanceRef.current = map;
+                }
+            }, []);
+
+            useEffect(() => {
+                const map = mapInstanceRef.current;
+                if (!map) return;
+                if (tileLayerRef.current) map.removeLayer(tileLayerRef.current);
+
+                const getUrl = (provider, showLabels) => {
+                    const suffix = showLabels ? '_all' : '_nolabels';
+                    switch(provider) {
+                        case 'carto_light': return `https://{s}.basemaps.cartocdn.com/light${suffix}/{z}/{x}/{y}{r}.png`;
+                        case 'carto_dark': return `https://{s}.basemaps.cartocdn.com/dark${suffix}/{z}/{x}/{y}{r}.png`;
+                        case 'osm': return 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+                        case 'satellite': return 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+                        default: return `https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png`;
+                    }
+                };
+
+                const layer = L.tileLayer(getUrl(config.tileProvider, config.mapLabels), {
+                    opacity: config.mapOpacity,
+                    crossOrigin: 'anonymous',
+                    maxZoom: 19,
+                    className: 'custom-tile-layer'
+                });
+
+                layer.addTo(map);
+                tileLayerRef.current = layer;
+
+                const container = layer.getContainer();
+                if (container) {
+                    container.style.filter = `saturate(${config.mapSaturation}%) contrast(${config.mapContrast}%)`;
+                }
+            }, [config.tileProvider, config.mapOpacity, config.mapLabels, config.mapSaturation, config.mapContrast]);
+
+
+            // Draw Data - Route & Flights
+            useEffect(() => {
+                const map = mapInstanceRef.current;
+                if (!map) return;
+
+                if (!tripData || !locationsData) {
+                    clearRenderedData();
+                    return;
+                }
+
+                clearRenderedData();
+
+                if (!routeLayerRef.current) routeLayerRef.current = L.featureGroup().addTo(map);
+                if (!flightLayerRef.current) flightLayerRef.current = L.featureGroup().addTo(map);
+                if (!markerLayerRef.current) markerLayerRef.current = L.featureGroup().addTo(map);
+
+                const [startIdx, endIdx] = timeline;
+                const safeStart = Math.max(0, startIdx);
+                const safeEnd = Math.min(locationsData.locations.length, endIdx);
+                
+                const filteredLocations = locationsData.locations.slice(safeStart, safeEnd);
+                if (filteredLocations.length === 0) return;
+
+                // --- Route Construction ---
+                const groundPaths = [];
+                const flightPaths = [];
+                let currentPath = [];
+
+                for (let i = 0; i < filteredLocations.length; i++) {
+                    const current = filteredLocations[i];
+                    currentPath.push([current.lat, current.lon]);
+                    
+                    if (i < filteredLocations.length - 1) {
+                        const next = filteredLocations[i + 1];
+                        const dist = getHaversineDistance(current, next);
+
+                        if (config.detectFlights && dist > config.flightThreshold) {
+                            if (currentPath.length > 1) groundPaths.push([...currentPath]);
+                            currentPath = []; 
+                            const arcPoints = getGreatCirclePoints(current, next);
+                            flightPaths.push(arcPoints);
+                        }
+                    }
+                }
+                if (currentPath.length > 1) groundPaths.push(currentPath);
+
+                if (groundPaths.length > 0) {
+                    L.polyline(groundPaths, {
+                        color: config.routeColor, weight: config.routeWidth, opacity: config.routeOpacity, lineJoin: 'round', lineCap: 'round', renderer: canvasRendererRef.current
+                    }).addTo(routeLayerRef.current);
+                }
+
+                if (flightPaths.length > 0) {
+                    flightPaths.forEach(path => {
+                        L.polyline(path, {
+                            color: config.flightColor, weight: config.routeWidth, opacity: config.flightOpacity, dashArray: '5, 10', renderer: canvasRendererRef.current
+                        }).addTo(flightLayerRef.current);
+                    });
+                }
+
+                if (config.showSteps && tripData.all_steps) {
+                    const startTimeWindow = filteredLocations[0].time;
+                    const endTimeWindow = filteredLocations[filteredLocations.length - 1].time;
+
+                    tripData.all_steps.forEach(step => {
+                        if (step.start_time < startTimeWindow || step.start_time > endTimeWindow) return;
+
+                        const hasPhotos = photos[step.id] && photos[step.id].length > 0;
+                        const position = [step.location.lat, step.location.lon];
+                        
+                        if (config.showPhotos && hasPhotos) {
+                            const thumbUrl = photos[step.id][0];
+                            const iconSize = config.photoMarkerSize;
+                            const photoIcon = L.divIcon({
+                                className: '',
+                                html: `<div class="photo-marker" style="width:${iconSize}px;height:${iconSize}px;background-image:url('${thumbUrl}');background-size:cover;background-position:center;border:2px solid white;border-radius:50%;box-shadow:0 4px 6px rgba(0,0,0,0.3);"></div>`,
+                                iconSize: [iconSize, iconSize], iconAnchor: [iconSize / 2, iconSize / 2], popupAnchor: [0, -iconSize / 2]
+                            });
+                            const marker = L.marker(position, { icon: photoIcon, id: step.id, type: 'photo' });
+                            bindPopup(marker, step, hasPhotos);
+                            marker.addTo(markerLayerRef.current);
+                        } else {
+                            const marker = L.circleMarker(position, {
+                                radius: config.stepRadius, fillColor: config.stepColor, color: '#fff', weight: 1, opacity: 1, fillOpacity: config.stepOpacity, renderer: canvasRendererRef.current, id: step.id, type: 'circle'
+                            });
+                            bindPopup(marker, step, hasPhotos);
+                            marker.addTo(markerLayerRef.current);
+                        }
+                    });
+                }
+
+                const visibleBounds = getLocationBounds(filteredLocations);
+                if (!hasAutoFitRef.current && visibleBounds?.isValid()) {
+                    map.fitBounds(visibleBounds, { padding: [50, 50] });
+                    hasAutoFitRef.current = true;
+                }
+            }, [tripData, locationsData, photos, config, timeline]); 
+
+            const bindPopup = (marker, step, hasPhotos) => {
+                let popupContent = `<div class="p-2 font-sans"><h3 class="font-bold text-lg mb-1">${step.display_name || step.name}</h3><p class="text-xs text-gray-400 mb-2">${new Date(step.start_time * 1000).toLocaleDateString()}</p><p class="text-sm">${step.description || ''}</p></div>`;
+                if (config.showPhotos && hasPhotos) {
+                    const imgs = photos[step.id].slice(0, 4).map(url => `<img src="${url}" class="w-full h-32 object-cover rounded mb-1" />`).join('');
+                    popupContent += `<div class="grid grid-cols-2 gap-1 mt-2">${imgs}</div>`;
+                }
+                marker.bindPopup(popupContent, { minWidth: 200, maxWidth: 300 });
+                if (config.showStepLabels) {
+                    marker.bindTooltip(step.display_name || step.name, {
+                        permanent: true, direction: 'top', offset: [0, config.showPhotos && hasPhotos ? -(config.photoMarkerSize/2) : -10],
+                        className: 'bg-transparent border-none shadow-none font-bold', opacity: 0.9
+                    });
+                }
+            };
+
+            useEffect(() => {
+                const mapContainer = document.getElementById('map-container');
+                if (!mapContainer || !config.cropEnabled) return;
+
+                const updateCropBox = () => {
+                    const w = mapContainer.offsetWidth;
+                    const h = mapContainer.offsetHeight;
+                    const scale = config.cropScale;
+                    const ratio = getAspectRatio(config.cropRatio) || (16 / 9);
+
+                    let boxW = w * scale;
+                    let boxH = boxW / ratio;
+
+                    if (boxH > h * scale) {
+                        boxH = h * scale;
+                        boxW = boxH * ratio;
+                    }
+
+                    setCropBox({ width: boxW, height: boxH });
+                };
+
+                updateCropBox();
+
+                if (typeof ResizeObserver === 'undefined') {
+                    window.addEventListener('resize', updateCropBox);
+                    return () => window.removeEventListener('resize', updateCropBox);
+                }
+
+                const observer = new ResizeObserver(updateCropBox);
+                observer.observe(mapContainer);
+
+                return () => observer.disconnect();
+            }, [config.cropEnabled, config.cropRatio, config.cropScale]);
+
+
+            // --- Export Logic ---
+            const handleExport = async () => {
+                const mapElement = document.getElementById('map-container');
+                const map = mapInstanceRef.current;
+                if (!mapElement || !map) return;
+                
+                setLoading(true);
+
+                // 0. Save Original View State
+                const originalCenter = map.getCenter();
+                const originalZoom = map.getZoom();
+
+                // --- 1. Determine Capture Area and Target Resolution ---
+                let boundsToFit;
+                let aspectRatio; 
+
+                if (config.cropEnabled && cropFrameRef.current) {
+                    // CROP MODE
+                    const cropRect = cropFrameRef.current.getBoundingClientRect();
+                    const mapRect = mapElement.getBoundingClientRect();
+
+                    // Calculate corners of crop box relative to map container
+                    const topLeft = L.point(
+                        cropRect.left - mapRect.left,
+                        cropRect.top - mapRect.top
+                    );
+                    const bottomRight = L.point(
+                        cropRect.right - mapRect.left,
+                        cropRect.bottom - mapRect.top
+                    );
+
+                    // Convert to Geographic Bounds
+                    const northWest = map.containerPointToLatLng(topLeft);
+                    const southEast = map.containerPointToLatLng(bottomRight);
+                    boundsToFit = L.latLngBounds(northWest, southEast);
+                    aspectRatio = cropRect.width / cropRect.height;
+                } else {
+                    // SCREEN MODE (Use visible map)
+                    aspectRatio = getAspectRatio(config.exportFormat) || (mapElement.offsetWidth / mapElement.offsetHeight);
+                    boundsToFit = map.getBounds();
+                }
+
+                // --- 2. Determine Target Dimensions (Pixels) ---
+                let finalWidth, finalHeight;
+
+                if (config.exportResolution === 'screen') {
+                    if (config.cropEnabled && cropFrameRef.current) {
+                         finalWidth = cropFrameRef.current.getBoundingClientRect().width;
+                    } else {
+                         finalWidth = mapElement.offsetWidth;
+                    }
+                } else if (config.exportResolution === 'custom') {
+                    finalWidth = parseInt(config.customExportWidth) || 3000;
+                } else {
+                    finalWidth = parseInt(config.exportResolution);
+                }
+                
+                finalHeight = finalWidth / aspectRatio;
+
+                // --- 3. Calculate Scaling Factor for Styles ---
+                // Scale = Target Width / Reference Width (on current screen)
+                const currentReferenceWidth = (config.cropEnabled && cropFrameRef.current
+                    ? cropFrameRef.current.getBoundingClientRect().width
+                    : mapElement.offsetWidth) || mapElement.offsetWidth || 1;
+                const scale = finalWidth / currentReferenceWidth;
+                
+                // --- 4. Apply Scaling to Map Elements ---
+                const scaleLayer = (group) => {
+                    group.eachLayer(layer => {
+                        if(layer instanceof L.Polyline) layer.setStyle({ weight: config.routeWidth * scale });
+                        if (layer instanceof L.CircleMarker) layer.setRadius(config.stepRadius * scale);
+                        if (layer instanceof L.Marker && layer.options.icon) {
+                            const thumbUrl = photos[layer.options.id][0];
+                            const s = config.photoMarkerSize * scale;
+                            const photoIcon = L.divIcon({
+                                className: '',
+                                html: `<div class="photo-marker" style="width:${s}px;height:${s}px;background-image:url('${thumbUrl}');background-size:cover;background-position:center;border:${2 * scale}px solid white;border-radius:50%;box-shadow:0 4px 6px rgba(0,0,0,0.3);"></div>`,
+                                iconSize: [s, s], iconAnchor: [s/2, s/2], popupAnchor: [0, -s/2]
+                            });
+                            layer.setIcon(photoIcon);
+                        }
+                        const tooltip = layer.getTooltip();
+                        if(tooltip) {
+                            const isPhoto = layer instanceof L.Marker;
+                            const baseOffset = isPhoto ? -(config.photoMarkerSize * scale / 2) : (-10 * scale);
+                            tooltip.options.offset = [0, baseOffset];
+                            layer.unbindTooltip();
+                            layer.bindTooltip(tooltip.getContent(), tooltip.options);
+                        }
+                    });
+                };
+
+                if (routeLayerRef.current) scaleLayer(routeLayerRef.current);
+                if (flightLayerRef.current) scaleLayer(flightLayerRef.current);
+                if (markerLayerRef.current) scaleLayer(markerLayerRef.current);
+                mapElement.style.setProperty('--label-size', `${config.stepLabelSize * scale}px`);
+
+                // --- 5. Resize Map DOM for Capture ---
+                mapElement.style.width = `${finalWidth}px`;
+                mapElement.style.height = `${finalHeight}px`;
+                mapElement.style.position = 'fixed'; 
+                mapElement.style.top = '0'; 
+                mapElement.style.left = '0'; 
+                mapElement.style.zIndex = '-100'; 
+
+                map.invalidateSize();
+
+                await fitMapToBounds(map, boundsToFit, { padding: [0, 0], animate: false });
+                await waitForTileLayer(tileLayerRef.current);
+
+                try {
+                    const canvas = await html2canvas(mapElement, { useCORS: true, allowTaint: false, scale: 1, logging: false, backgroundColor: config.tileProvider.includes('dark') ? '#1a1a1a' : '#ffffff' });
+                    const link = document.createElement('a');
+                    const exportLabel = config.cropEnabled ? 'crop' : config.exportFormat;
+                    link.download = `polarsteps-map-${exportLabel}-${Date.now()}.png`;
+                    link.href = canvas.toDataURL('image/png');
+                    link.click();
+                } catch (e) {
+                    console.error(e); alert("Export failed.");
+                } finally {
+                    // --- 6. Cleanup & Restore ---
+                    mapElement.style.width = '100%'; 
+                    mapElement.style.height = '100%'; 
+                    mapElement.style.position = 'relative'; 
+                    mapElement.style.zIndex = '0'; 
+                    mapElement.style.top = 'auto'; 
+                    mapElement.style.left = 'auto';
+                    map.invalidateSize();
+                    mapElement.style.setProperty('--label-size', `${config.stepLabelSize}px`);
+                    
+                    const restoreLayer = (group) => {
+                         group.eachLayer(layer => {
+                            if(layer instanceof L.Polyline) layer.setStyle({ weight: config.routeWidth });
+                            if (layer instanceof L.CircleMarker) layer.setRadius(config.stepRadius);
+                            if (layer instanceof L.Marker && layer.options.icon) {
+                                const thumbUrl = photos[layer.options.id][0];
+                                const s = config.photoMarkerSize;
+                                const photoIcon = L.divIcon({ className: '', html: `<div class="photo-marker" style="width:${s}px;height:${s}px;background-image:url('${thumbUrl}');background-size:cover;background-position:center;border:2px solid white;border-radius:50%;box-shadow:0 4px 6px rgba(0,0,0,0.3);"></div>`, iconSize: [s, s], iconAnchor: [s/2, s/2], popupAnchor: [0, -s/2] });
+                                layer.setIcon(photoIcon);
+                            }
+                            const tooltip = layer.getTooltip();
+                            if(tooltip) {
+                                const isPhoto = layer instanceof L.Marker;
+                                const baseOffset = isPhoto ? -(config.photoMarkerSize/2) : -10;
+                                tooltip.options.offset = [0, baseOffset];
+                                layer.unbindTooltip();
+                                layer.bindTooltip(tooltip.getContent(), tooltip.options);
+                            }
+                        });
+                    }
+
+                    if (routeLayerRef.current) restoreLayer(routeLayerRef.current);
+                    if (flightLayerRef.current) restoreLayer(flightLayerRef.current);
+                    if (markerLayerRef.current) restoreLayer(markerLayerRef.current);
+                    
+                    // --- RESTORE VIEW ---
+                    map.setView(originalCenter, originalZoom, { animate: false });
+                    
+                    setLoading(false);
+                }
+            };
+
+            return (
+                <div className="flex w-full h-full bg-gray-900">
+                    <div className="w-80 flex-shrink-0 bg-gray-800 border-r border-gray-700 flex flex-col h-full overflow-y-auto z-20 shadow-xl">
+                        <div className="p-5 border-b border-gray-700">
+                            <h1 className="text-xl font-bold text-white tracking-tight flex items-center gap-2"><Icon name="map" className="text-blue-500" />Trip Visualizer</h1>
+                            <p className="text-xs text-gray-400 mt-1">Polarsteps Data Renderer</p>
+                        </div>
+                        {!tripData ? (
+                            <div className="p-6 flex flex-col items-center justify-center h-64 text-center space-y-4">
+                                <div className="p-4 bg-gray-700 rounded-full"><Icon name="upload" size={32} className="text-gray-400" /></div>
+                                <div>
+                                    <h3 className="font-medium text-gray-200">Upload Trip Folder</h3>
+                                    <p className="text-xs text-gray-400 mt-1 mb-4">Select the folder containing trip.json and locations.json</p>
+                                    <label className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded text-sm cursor-pointer transition-colors">
+                                        Select Folder
+                                        <input type="file" webkitdirectory="true" directory="true" multiple className="hidden" onChange={handleFolderSelect} />
+                                    </label>
+                                </div>
+                                {error && <p className="text-red-400 text-xs px-4 py-2 bg-red-900/30 rounded">{error}</p>}
+                            </div>
+                        ) : (
+                            <div className="flex-1 overflow-y-auto">
+                                <div className="p-4 bg-blue-900/20 border-b border-blue-900/50">
+                                    <h3 className="font-bold text-blue-100">{tripData.name}</h3>
+                                    <div className="flex justify-between text-xs text-blue-300 mt-1"><span>{tripData.total_km.toFixed(0)} km</span><span>{tripData.step_count} steps</span></div>
+                                </div>
+
+                                <Accordion title="Timeline & Crop" icon="clock" isOpen={openAccordion === 'timeline'} onClick={() => setOpenAccordion(openAccordion === 'timeline' ? '' : 'timeline')}>
+                                    <div className="px-2">
+                                        <DualRangeSlider min={0} max={totalPoints} values={timeline} onChange={setTimeline} />
+                                        <p className="text-[10px] text-gray-500 mt-4 text-center">Type numbers to fine-tune start/end points.</p>
+                                    </div>
+                                </Accordion>
+
+                                <Accordion title="Map Style" icon="image" isOpen={openAccordion === 'style'} onClick={() => setOpenAccordion(openAccordion === 'style' ? '' : 'style')}>
+                                    <ControlGroup label="Base Map">
+                                        <div className="grid grid-cols-2 gap-2 mb-3">
+                                            {['carto_light', 'carto_dark', 'osm', 'satellite'].map(provider => (
+                                                <button key={provider} onClick={() => setConfig({...config, tileProvider: provider})} className={`text-xs p-2 rounded border ${config.tileProvider === provider ? 'bg-blue-600 border-blue-500 text-white' : 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600'}`}>
+                                                    {provider.replace('_', ' ').toUpperCase()}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </ControlGroup>
+                                    <div className="flex items-center justify-between mb-4">
+                                        <span className="text-sm text-gray-400">Show Map Labels</span>
+                                        <input type="checkbox" checked={config.mapLabels} onChange={(e) => setConfig({...config, mapLabels: e.target.checked})} disabled={config.tileProvider === 'osm' || config.tileProvider === 'satellite'} className="accent-blue-500 disabled:opacity-50" />
+                                    </div>
+                                    <div className="space-y-4 pt-2 border-t border-gray-700">
+                                        <Slider label="Opacity" value={config.mapOpacity} min={0} max={1} step={0.1} onChange={(v) => setConfig({...config, mapOpacity: v})} />
+                                        <Slider label="Saturation" value={config.mapSaturation} min={0} max={200} step={10} onChange={(v) => setConfig({...config, mapSaturation: v})} unit="%" />
+                                        <Slider label="Contrast" value={config.mapContrast} min={50} max={150} step={10} onChange={(v) => setConfig({...config, mapContrast: v})} unit="%" />
+                                    </div>
+                                </Accordion>
+
+                                <Accordion title="Route & Flights" icon="map" isOpen={openAccordion === 'route'} onClick={() => setOpenAccordion(openAccordion === 'route' ? '' : 'route')}>
+                                    <div className="space-y-4">
+                                        <ControlGroup label="Ground Path">
+                                            <ColorPicker label="Color" value={config.routeColor} onChange={(v) => setConfig({...config, routeColor: v})} />
+                                            <Slider label="Width" value={config.routeWidth} min={1} max={10} step={0.5} onChange={(v) => setConfig({...config, routeWidth: v})} unit="px" />
+                                            <Slider label="Opacity" value={config.routeOpacity} min={0.1} max={1} step={0.1} onChange={(v) => setConfig({...config, routeOpacity: v})} />
+                                        </ControlGroup>
+
+                                        <div className="pt-4 border-t border-gray-700">
+                                            <div className="flex items-center justify-between mb-2">
+                                                <label className="text-xs uppercase tracking-wider text-gray-500 font-semibold flex items-center gap-1"><Icon name="plane" size={12}/> Flight Detection</label>
+                                                <input type="checkbox" checked={config.detectFlights} onChange={(e) => setConfig({...config, detectFlights: e.target.checked})} className="accent-blue-500" />
+                                            </div>
+                                            {config.detectFlights && (
+                                                <div className="pl-2 border-l-2 border-orange-500/30 space-y-3">
+                                                    <Slider label="Min Dist" value={config.flightThreshold} min={50} max={2000} step={50} onChange={(v) => setConfig({...config, flightThreshold: v})} unit="km" />
+                                                    <ColorPicker label="Flight Color" value={config.flightColor} onChange={(v) => setConfig({...config, flightColor: v})} />
+                                                    <Slider label="Flight Opacity" value={config.flightOpacity} min={0.1} max={1} step={0.1} onChange={(v) => setConfig({...config, flightOpacity: v})} />
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                </Accordion>
+
+                                <Accordion title="Steps & Markers" icon="settings" isOpen={openAccordion === 'markers'} onClick={() => setOpenAccordion(openAccordion === 'markers' ? '' : 'markers')}>
+                                    <div className="flex items-center justify-between">
+                                        <span className="text-sm text-gray-400">Show Steps</span>
+                                        <input type="checkbox" checked={config.showSteps} onChange={(e) => setConfig({...config, showSteps: e.target.checked})} className="accent-blue-500" />
+                                    </div>
+                                    {config.showSteps && (
+                                        <>
+                                            {!config.showPhotos && (
+                                                <>
+                                                    <ColorPicker label="Marker Color" value={config.stepColor} onChange={(v) => setConfig({...config, stepColor: v})} />
+                                                    <Slider label="Size" value={config.stepRadius} min={1} max={20} step={1} onChange={(v) => setConfig({...config, stepRadius: v})} unit="px" />
+                                                </>
+                                            )}
+                                            <div className="pt-2 border-t border-gray-700 mt-2">
+                                                <div className="flex items-center justify-between mb-4">
+                                                    <span className="text-sm text-gray-400">Show Photos on Map</span>
+                                                    <input type="checkbox" checked={config.showPhotos} onChange={(e) => setConfig({...config, showPhotos: e.target.checked})} className="accent-blue-500" />
+                                                </div>
+                                                {config.showPhotos && <div className="mb-4"><Slider label="Photo Size" value={config.photoMarkerSize} min={20} max={150} step={5} onChange={(v) => setConfig({...config, photoMarkerSize: v})} unit="px" /></div>}
+                                                <div className="flex items-center justify-between mb-2">
+                                                    <span className="text-sm text-gray-400">Show Labels</span>
+                                                    <input type="checkbox" checked={config.showStepLabels} onChange={(e) => setConfig({...config, showStepLabels: e.target.checked})} className="accent-blue-500" />
+                                                </div>
+                                                {config.showStepLabels && <Slider label="Label Size" value={config.stepLabelSize} min={8} max={24} step={1} onChange={(v) => setConfig({...config, stepLabelSize: v})} unit="px" />}
+                                            </div>
+                                        </>
+                                    )}
+                                </Accordion>
+
+                                <Accordion title="Export Image" icon="download" isOpen={openAccordion === 'export'} onClick={() => setOpenAccordion(openAccordion === 'export' ? '' : 'export')}>
+                                    <div className="flex items-center justify-between mb-4 p-2 bg-gray-700/50 rounded border border-gray-600">
+                                        <span className="text-sm font-medium text-white flex items-center gap-2"><Icon name="crop" size={16}/> Enable Crop Tool</span>
+                                        <input type="checkbox" checked={config.cropEnabled} onChange={(e) => setConfig({...config, cropEnabled: e.target.checked})} className="accent-green-500 w-4 h-4" />
+                                    </div>
+
+                                    {config.cropEnabled ? (
+                                        <div className="space-y-4">
+                                            <ControlGroup label="Aspect Ratio">
+                                                <div className="grid grid-cols-3 gap-2">
+                                                    {[['A4 Land', 'a4_land'], ['A4 Port', 'a4_port'], ['16:9', '16_9'], ['Poster', 'poster'], ['Square', 'square']].map(([label, val]) => (
+                                                        <button key={val} onClick={() => setConfig({...config, cropRatio: val})} className={`text-[10px] p-2 rounded border ${config.cropRatio === val ? 'bg-blue-600 border-blue-500 text-white' : 'bg-gray-700 border-gray-600 text-gray-300'}`}>{label}</button>
+                                                    ))}
+                                                </div>
+                                            </ControlGroup>
+                                            <Slider label="Frame Scale" value={config.cropScale} min={0.3} max={0.95} step={0.05} onChange={(v) => setConfig({...config, cropScale: v})} />
+                                            <ControlGroup label="Target Resolution (Width)">
+                                                <div className="flex gap-2 mb-2">
+                                                    {[['Screen', 'screen'], ['2K', 2048], ['4K', 3840], ['Custom', 'custom']].map(([label, val]) => (
+                                                        <button key={label} onClick={() => setConfig({...config, exportResolution: val})} className={`flex-1 text-[10px] p-2 rounded border ${config.exportResolution === val ? 'bg-blue-600 border-blue-500 text-white' : 'bg-gray-700 border-gray-600 text-gray-300'}`}>{label}</button>
+                                                    ))}
+                                                </div>
+                                                {config.exportResolution === 'custom' && (
+                                                    <div className="flex items-center gap-2 mt-2">
+                                                        <span className="text-xs text-gray-400">Width:</span>
+                                                        <input 
+                                                            type="number" 
+                                                            value={config.customExportWidth} 
+                                                            onChange={(e) => setConfig({...config, customExportWidth: e.target.value})}
+                                                            className="bg-gray-700 border border-gray-600 text-white text-xs rounded p-1 w-20"
+                                                            min="500" max="10000"
+                                                        />
+                                                        <span className="text-xs text-gray-500">px</span>
+                                                    </div>
+                                                )}
+                                            </ControlGroup>
+                                        </div>
+                                    ) : (
+                                        <ControlGroup label="Quick Presets (Full Screen)">
+                                            <select value={config.exportFormat} onChange={(e) => setConfig({...config, exportFormat: e.target.value})} className="w-full bg-gray-700 text-gray-200 text-sm rounded p-2 border border-gray-600 focus:border-blue-500 outline-none">
+                                                <option value="screen">Current Screen View</option>
+                                                <option value="a4_land">A4 Landscape</option>
+                                                <option value="a4_port">A4 Portrait</option>
+                                                <option value="poster">Poster</option>
+                                            </select>
+                                        </ControlGroup>
+                                    )}
+                                    
+                                    <button onClick={handleExport} disabled={loading} className="w-full mt-6 bg-green-600 hover:bg-green-500 text-white font-bold py-3 rounded flex items-center justify-center gap-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-green-900/20">
+                                        {loading ? <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div> : <Icon name="download" size={18} />}
+                                        Capture & Download
+                                    </button>
+                                </Accordion>
+
+                                <div className="p-4 mt-auto grid grid-cols-2 gap-3 border-t border-gray-700">
+                                    <button onClick={() => setConfig(initialConfig)} className="flex items-center justify-center gap-1 text-xs font-medium py-2 px-3 bg-gray-700 hover:bg-gray-600 text-gray-200 rounded transition-colors" title="Reset all styling to default"><Icon name="rotateCcw" size={14} />Reset Style</button>
+                                    <button onClick={resetTrip} className="flex items-center justify-center gap-1 text-xs font-medium py-2 px-3 bg-red-900/20 hover:bg-red-900/40 text-red-400 border border-red-900/30 rounded transition-colors" title="Upload a different trip"><Icon name="upload" size={14} />Upload New</button>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                    <div className="flex-1 relative bg-gray-950 overflow-hidden">
+                        {loading && <div className="absolute inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center flex-col text-white"><div className="loader mb-4"></div><p className="font-medium animate-pulse">Generating High-Res Map...</p></div>}
+                        
+                        {/* Crop Overlay */}
+                        {config.cropEnabled && (
+                            <div className="crop-overlay">
+                                <div 
+                                    ref={cropFrameRef}
+                                    className="crop-frame" 
+                                    style={{ width: cropBox.width, height: cropBox.height }}
+                                />
+                            </div>
+                        )}
+
+                        <div id="map-container" className="w-full h-full relative z-0"><div ref={mapRef} className="w-full h-full" /></div>
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
