@@ -94,6 +94,30 @@
         };
 
         const getAspectRatio = format => ({ a4_land: 297/210, a4_port: 210/297, poster: 1.5, square: 1, '16_9': 16/9 }[format] || null);
+        const getFolderNameFromFiles = files => {
+            const firstPath = Array.from(files || []).map(f => f.webkitRelativePath || f.name).find(Boolean);
+            if (!firstPath) return 'Imported Route';
+            const parts = firstPath.replace(/\\/g, '/').split('/').filter(Boolean);
+            if (parts.length > 1) return parts[0];
+            const baseName = firstPath.replace(/\.[^.]+$/, '');
+            return /^(locations|trip)$/i.test(baseName) ? 'Imported Route' : (baseName || 'Imported Route');
+        };
+        const calculateTotalKm = locs => {
+            let total = 0;
+            for (let i = 0; i < locs.length - 1; i++) {
+                const cur = locs[i], next = locs[i + 1];
+                if (![cur?.lat, cur?.lon, next?.lat, next?.lon].every(Number.isFinite)) continue;
+                total += getHaversineDistance(cur, next);
+            }
+            return total;
+        };
+        const createFallbackTripData = (files, locations) => ({
+            name: getFolderNameFromFiles(files),
+            total_km: calculateTotalKm(locations),
+            step_count: 0,
+            all_steps: [],
+            isDerivedFromLocations: true
+        });
         const getLocationBounds = locs => {
             const pts = locs.filter(l => Number.isFinite(l?.lat) && Number.isFinite(l?.lon)).map(l => [l.lat, l.lon]);
             return pts.length ? L.latLngBounds(pts) : null;
@@ -195,12 +219,18 @@
                     <div class="p-6 flex flex-col items-center justify-center h-64 text-center space-y-4">
                         <div class="p-4 bg-gray-700 rounded-full text-gray-400">${icons.upload}</div>
                         <div>
-                            <h3 class="font-medium text-gray-200">Upload Trip Folder</h3>
-                            <p class="text-xs text-gray-400 mt-1 mb-4">Select the folder containing trip.json and locations.json</p>
-                            <label class="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded text-sm cursor-pointer transition-colors">
-                                Select Folder
-                                <input type="file" webkitdirectory directory multiple class="hidden" onchange="handleFolderSelect(event)">
-                            </label>
+                            <h3 class="font-medium text-gray-200">Upload Trip Data</h3>
+                            <p class="text-xs text-gray-400 mt-1 mb-4">Choose a folder or file list containing <span class="font-mono text-gray-300">locations.json</span>. <span class="font-mono text-gray-300">trip.json</span> and photos are optional.</p>
+                            <div class="flex flex-wrap items-center justify-center gap-2">
+                                <label class="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded text-sm cursor-pointer transition-colors">
+                                    Select Folder
+                                    <input type="file" webkitdirectory directory multiple class="hidden" onchange="handleFolderSelect(event)">
+                                </label>
+                                <label class="bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded text-sm cursor-pointer transition-colors border border-gray-600">
+                                    Select Files
+                                    <input type="file" multiple class="hidden" onchange="handleFolderSelect(event)">
+                                </label>
+                            </div>
                         </div>
                         ${state.error ? `<p class="text-red-400 text-xs px-4 py-2 bg-red-900/30 rounded">${state.error}</p>` : ''}
                     </div>
@@ -228,6 +258,9 @@
                     <span class="text-sm text-gray-400 ${prop==='cropEnabled'?'font-medium text-white flex gap-2':''}">${prop==='cropEnabled'?icons.crop+' ':''}${label}</span>
                     <input type="checkbox" ${state.config[prop]?'checked':''} onchange="updateConfig('${prop}', this.checked)" class="accent-blue-500 ${prop==='cropEnabled'?'accent-green-500 w-4 h-4':''}">
                 </div>`;
+            const hasStepData = Array.isArray(state.tripData?.all_steps) && state.tripData.all_steps.length > 0;
+            const totalKm = Number.isFinite(Number(state.tripData?.total_km)) ? Number(state.tripData.total_km) : calculateTotalKm(state.locationsData?.locations || []);
+            const summaryCount = hasStepData ? `${state.tripData.all_steps.length} steps` : `${state.totalPoints} points`;
 
             let timelineBody = `
                 <div class="py-2 space-y-2">
@@ -271,16 +304,18 @@
                 </div>`;
             
             let markersBody = `
-                ${renderCheck('showSteps', 'Show Steps')}
-                ${state.config.showSteps ? `
-                    ${!state.config.showPhotos ? `${renderColor('stepColor', 'Marker Color')} ${renderSlider('stepRadius', 'stepRadius', 'Size', 1, 20, 1, 'px')}` : ''}
-                    <div class="pt-2 border-t border-gray-700 mt-2">
-                        ${renderCheck('showPhotos', 'Show Photos on Map')}
-                        ${state.config.showPhotos ? `<div class="mb-4">${renderSlider('photoSz', 'photoMarkerSize', 'Photo Size', 20, 150, 5, 'px')}</div>` : ''}
-                        ${renderCheck('showStepLabels', 'Show Labels')}
-                        ${state.config.showStepLabels ? renderSlider('lblSz', 'stepLabelSize', 'Label Size', 8, 24, 1, 'px') : ''}
-                    </div>
-                ` : ''}`;
+                ${hasStepData ? `
+                    ${renderCheck('showSteps', 'Show Steps')}
+                    ${state.config.showSteps ? `
+                        ${!state.config.showPhotos ? `${renderColor('stepColor', 'Marker Color')} ${renderSlider('stepRadius', 'stepRadius', 'Size', 1, 20, 1, 'px')}` : ''}
+                        <div class="pt-2 border-t border-gray-700 mt-2">
+                            ${renderCheck('showPhotos', 'Show Photos on Map')}
+                            ${state.config.showPhotos ? `<div class="mb-4">${renderSlider('photoSz', 'photoMarkerSize', 'Photo Size', 20, 150, 5, 'px')}</div>` : ''}
+                            ${renderCheck('showStepLabels', 'Show Labels')}
+                            ${state.config.showStepLabels ? renderSlider('lblSz', 'stepLabelSize', 'Label Size', 8, 24, 1, 'px') : ''}
+                        </div>
+                    ` : ''}
+                ` : `<div class="text-sm text-gray-400 bg-gray-800/70 border border-gray-700 rounded p-3">Step labels and photo markers need <span class="font-mono text-gray-300">trip.json</span>. Route rendering and image export still work with <span class="font-mono text-gray-300">locations.json</span> only.</div>`}`;
 
             let exportBody = `
                 ${renderCheck('cropEnabled', 'Enable Crop Tool')}
@@ -319,7 +354,8 @@
                 <div class="flex-1 overflow-y-auto">
                     <div class="p-4 bg-blue-900/20 border-b border-blue-900/50">
                         <h3 class="font-bold text-blue-100">${state.tripData.name}</h3>
-                        <div class="flex justify-between text-xs text-blue-300 mt-1"><span>${state.tripData.total_km.toFixed(0)} km</span><span>${state.tripData.step_count} steps</span></div>
+                        <div class="flex justify-between text-xs text-blue-300 mt-1"><span>${totalKm.toFixed(0)} km</span><span>${summaryCount}</span></div>
+                        ${state.tripData.isDerivedFromLocations ? `<p class="text-[11px] text-blue-300/80 mt-2">Loaded from <span class="font-mono">locations.json</span> only.</p>` : ''}
                     </div>
                     <div class="border-b border-gray-700">${accHeader('timeline', 'Timeline & Crop', 'clock')}${accBody('timeline', timelineBody)}</div>
                     <div class="border-b border-gray-700">${accHeader('style', 'Map Style', 'image')}${accBody('style', styleBody)}</div>
@@ -379,9 +415,9 @@
                     if (file.name === 'trip.json' || file.name.endsWith('/trip.json')) fdTrip = JSON.parse(await file.text());
                     else if (file.name === 'locations.json' || file.name.endsWith('/locations.json')) fdLocations = JSON.parse(await file.text());
                 }
-                if (!fdTrip || !fdLocations) throw new Error("Could not find trip.json and locations.json.");
+                if (!fdLocations) throw new Error("Could not find locations.json.");
                 
-                const allSteps = Array.isArray(fdTrip.all_steps) ? fdTrip.all_steps.map(s => ({...s, id: Number(s.id)})).filter(s => Number.isFinite(s.id)) : [];
+                const allSteps = Array.isArray(fdTrip?.all_steps) ? fdTrip.all_steps.map(s => ({...s, id: Number(s.id)})).filter(s => Number.isFinite(s.id)) : [];
                 const sortedLocs = Array.isArray(fdLocations.locations) ? [...fdLocations.locations].sort((a,b)=>a.time-b.time) : [];
                 if (!sortedLocs.length) throw new Error("No locations found.");
 
@@ -396,7 +432,7 @@
                     }
                 }
                 Object.values(state.photos).flat().forEach(u => URL.revokeObjectURL(u));
-                state.tripData = {...fdTrip, all_steps: allSteps};
+                state.tripData = fdTrip ? {...fdTrip, all_steps: allSteps, isDerivedFromLocations: false} : createFallbackTripData(files, sortedLocs);
                 state.locationsData = {...fdLocations, locations: sortedLocs};
                 state.photos = newPhotos;
                 state.totalPoints = sortedLocs.length;
@@ -461,7 +497,7 @@
             if(gp.length) L.polyline(gp, { color: state.config.routeColor, weight: state.config.routeWidth, opacity: state.config.routeOpacity, lineJoin: 'round', lineCap: 'round', renderer: canvasRenderer }).addTo(routeLayer);
             if(fp.length) fp.forEach(p => L.polyline(p, { color: state.config.flightColor, weight: state.config.routeWidth, opacity: state.config.flightOpacity, dashArray: '5, 10', renderer: canvasRenderer }).addTo(flightLayer));
 
-            if(state.config.showSteps && state.tripData.all_steps) {
+            if(state.config.showSteps && Array.isArray(state.tripData.all_steps) && state.tripData.all_steps.length) {
                 const sT = locs[0].time, eT = locs[locs.length-1].time;
                 state.tripData.all_steps.forEach(step => {
                     if(step.start_time < sT || step.start_time > eT) return;
