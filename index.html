@@ -26,6 +26,7 @@
     <style>
         body { margin: 0; padding: 0; overflow: hidden; background: #1a1a1a; color: #e5e5e5; }
         #root { height: 100vh; width: 100vw; display: flex; }
+        #map-container, #map-container > div { width: 100%; height: 100%; }
         
         /* Leaflet Overrides for Dark Mode integration */
         .leaflet-container { background: #1a1a1a; font-family: 'Inter', sans-serif; }
@@ -172,6 +173,73 @@
             Object.values(photoMap).flat().forEach((url) => URL.revokeObjectURL(url));
         };
 
+        const escapeHtml = (value = '') => String(value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+
+        const escapeRegExp = (value = '') => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+        const normalizeSearchToken = (value = '') => String(value)
+            .normalize('NFKD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-+|-+$/g, '');
+
+        const getStepLabel = (step = {}) => {
+            const label = String(step.display_name || step.name || '').trim();
+            return label || `Step ${step.id ?? ''}`.trim() || 'Untitled step';
+        };
+
+        const formatPopupText = (value = '') => escapeHtml(value).replace(/\r?\n/g, '<br />');
+
+        const buildPhotoStepMatchers = (steps = []) => steps.map((step) => ({
+            id: step.id,
+            idString: String(step.id),
+            nameSlugs: [...new Set([step.display_name, step.name].map(normalizeSearchToken).filter(Boolean))]
+        }));
+
+        const findStepIdBySegment = (segments, stepMatchers) => {
+            for (const segment of segments) {
+                for (const matcher of stepMatchers) {
+                    if (segment === matcher.idString) return matcher.id;
+                    if (new RegExp(`(^|[^0-9])${escapeRegExp(matcher.idString)}([^0-9]|$)`).test(segment)) {
+                        return matcher.id;
+                    }
+                }
+            }
+            return null;
+        };
+
+        const findMatchingStepIdForPhoto = (path, stepMatchers) => {
+            const normalizedPath = String(path || '').replace(/\\/g, '/').toLowerCase();
+            const segments = normalizedPath.split('/').filter(Boolean);
+            if (segments.length === 0) return null;
+
+            const directorySegments = segments.slice(0, -1);
+            const fileName = segments[segments.length - 1];
+            const fileStem = fileName.replace(/\.[^.]+$/, '');
+
+            const directMatch = findStepIdBySegment(directorySegments, stepMatchers)
+                ?? findStepIdBySegment([fileStem], stepMatchers);
+            if (directMatch !== null) return directMatch;
+
+            const slugSegments = [...directorySegments, fileStem].map(normalizeSearchToken).filter(Boolean);
+            const slugMatches = stepMatchers.filter((matcher) => matcher.nameSlugs.some((slug) => slugSegments.includes(slug)));
+            if (slugMatches.length === 1) return slugMatches[0].id;
+
+            const fallbackNumbers = normalizedPath.match(/(\d+)/g) || [];
+            for (const token of fallbackNumbers) {
+                const numericToken = parseInt(token, 10);
+                if (stepMatchers.some((matcher) => matcher.id === numericToken)) return numericToken;
+            }
+
+            return null;
+        };
+
         const fitMapToBounds = (map, bounds, options = {}) => new Promise((resolve) => {
             if (!map || !bounds?.isValid?.()) {
                 resolve();
@@ -213,6 +281,27 @@
                 if (!layer._loading) finish();
             });
         });
+
+        const scheduleMapRefresh = (map) => {
+            if (!map) return () => {};
+
+            let cancelled = false;
+            const timers = [];
+            const refresh = () => {
+                if (cancelled) return;
+                map.invalidateSize({ pan: false });
+            };
+
+            refresh();
+            requestAnimationFrame(() => requestAnimationFrame(refresh));
+            timers.push(setTimeout(refresh, 0));
+            timers.push(setTimeout(refresh, 120));
+
+            return () => {
+                cancelled = true;
+                timers.forEach(clearTimeout);
+            };
+        };
 
         // --- Icons ---
         const Icon = ({ name, size = 20, className }) => {
@@ -446,7 +535,11 @@
                     if (!foundTrip) throw new Error("Could not find 'trip.json'.");
                     if (!foundLocations) throw new Error("Could not find 'locations.json'.");
 
-                    const allSteps = Array.isArray(foundTrip.all_steps) ? foundTrip.all_steps : [];
+                    const allSteps = Array.isArray(foundTrip.all_steps)
+                        ? foundTrip.all_steps
+                            .map((step) => ({ ...step, id: Number(step.id) }))
+                            .filter((step) => Number.isFinite(step.id))
+                        : [];
                     const sortedLocations = Array.isArray(foundLocations.locations)
                         ? [...foundLocations.locations].sort((a, b) => a.time - b.time)
                         : [];
@@ -456,19 +549,15 @@
                     const nextTripData = { ...foundTrip, all_steps: allSteps };
                     const nextLocationsData = { ...foundLocations, locations: sortedLocations };
 
-                    const validStepIds = new Set(allSteps.map(step => step.id));
+                    const stepMatchers = buildPhotoStepMatchers(allSteps);
                     
                     for (const file of fileList) {
                         if (file.type.startsWith('image/')) {
                             const path = file.webkitRelativePath || file.name;
-                            const numbersInPath = path.match(/(\d+)/g);
-                            if (numbersInPath) {
-                                const matchingStepId = numbersInPath.find(num => validStepIds.has(parseInt(num)));
-                                if (matchingStepId) {
-                                    const stepId = parseInt(matchingStepId);
-                                    if (!newPhotos[stepId]) newPhotos[stepId] = [];
-                                    newPhotos[stepId].push(URL.createObjectURL(file));
-                                }
+                            const stepId = findMatchingStepIdForPhoto(path, stepMatchers);
+                            if (stepId !== null) {
+                                if (!newPhotos[stepId]) newPhotos[stepId] = [];
+                                newPhotos[stepId].push(URL.createObjectURL(file));
                             }
                         }
                     }
@@ -504,6 +593,13 @@
                     
                     canvasRendererRef.current = L.canvas({ padding: 0.5 });
                     mapInstanceRef.current = map;
+                    const cancelRefresh = scheduleMapRefresh(map);
+
+                    return () => {
+                        cancelRefresh();
+                        map.remove();
+                        mapInstanceRef.current = null;
+                    };
                 }
             }, []);
 
@@ -512,18 +608,29 @@
                 const mapContainer = document.getElementById('map-container');
                 if (!map || !mapContainer) return;
 
-                const refreshMapSize = () => map.invalidateSize({ pan: false });
-                requestAnimationFrame(refreshMapSize);
+                let cancelRefresh = () => {};
+                const refreshMapSize = () => {
+                    cancelRefresh();
+                    cancelRefresh = scheduleMapRefresh(map);
+                };
+
+                refreshMapSize();
 
                 if (typeof ResizeObserver === 'undefined') {
                     window.addEventListener('resize', refreshMapSize);
-                    return () => window.removeEventListener('resize', refreshMapSize);
+                    return () => {
+                        cancelRefresh();
+                        window.removeEventListener('resize', refreshMapSize);
+                    };
                 }
 
                 const observer = new ResizeObserver(refreshMapSize);
                 observer.observe(mapContainer);
 
-                return () => observer.disconnect();
+                return () => {
+                    cancelRefresh();
+                    observer.disconnect();
+                };
             }, []);
 
             useEffect(() => {
@@ -551,11 +658,22 @@
 
                 layer.addTo(map);
                 tileLayerRef.current = layer;
+                let cancelRefresh = scheduleMapRefresh(map);
+                const refreshAfterTileLoad = () => {
+                    cancelRefresh();
+                    cancelRefresh = scheduleMapRefresh(map);
+                };
+                layer.on('load', refreshAfterTileLoad);
 
                 const container = layer.getContainer();
                 if (container) {
                     container.style.filter = `saturate(${config.mapSaturation}%) contrast(${config.mapContrast}%)`;
                 }
+
+                return () => {
+                    cancelRefresh();
+                    layer.off('load', refreshAfterTileLoad);
+                };
             }, [config.tileProvider, config.mapOpacity, config.mapLabels, config.mapSaturation, config.mapContrast]);
 
 
@@ -626,8 +744,12 @@
                     tripData.all_steps.forEach(step => {
                         if (step.start_time < startTimeWindow || step.start_time > endTimeWindow) return;
 
+                        const lat = Number(step?.location?.lat);
+                        const lon = Number(step?.location?.lon);
+                        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+
                         const hasPhotos = photos[step.id] && photos[step.id].length > 0;
-                        const position = [step.location.lat, step.location.lon];
+                        const position = [lat, lon];
                         
                         if (config.showPhotos && hasPhotos) {
                             const thumbUrl = photos[step.id][0];
@@ -669,14 +791,21 @@
             }, [tripData, locationsData, photos, config, timeline]); 
 
             const bindPopup = (marker, step, hasPhotos) => {
-                let popupContent = `<div class="p-2 font-sans"><h3 class="font-bold text-lg mb-1">${step.display_name || step.name}</h3><p class="text-xs text-gray-400 mb-2">${new Date(step.start_time * 1000).toLocaleDateString()}</p><p class="text-sm">${step.description || ''}</p></div>`;
+                const stepLabel = getStepLabel(step);
+                const safeLabel = escapeHtml(stepLabel);
+                const safeDate = escapeHtml(new Date(step.start_time * 1000).toLocaleDateString());
+                const safeDescription = formatPopupText(step.description || '');
+                let popupContent = `<div class="p-2 font-sans"><h3 class="font-bold text-lg mb-1">${safeLabel}</h3><p class="text-xs text-gray-400 mb-2">${safeDate}</p><p class="text-sm">${safeDescription}</p></div>`;
                 if (config.showPhotos && hasPhotos) {
-                    const imgs = photos[step.id].slice(0, 4).map(url => `<img src="${url}" class="w-full h-32 object-cover rounded mb-1" />`).join('');
+                    const imgs = photos[step.id]
+                        .slice(0, 4)
+                        .map((url, index) => `<img src="${escapeHtml(url)}" alt="${safeLabel} photo ${index + 1}" class="w-full h-32 object-cover rounded mb-1" />`)
+                        .join('');
                     popupContent += `<div class="grid grid-cols-2 gap-1 mt-2">${imgs}</div>`;
                 }
                 marker.bindPopup(popupContent, { minWidth: 200, maxWidth: 300 });
                 if (config.showStepLabels) {
-                    marker.bindTooltip(step.display_name || step.name, {
+                    marker.bindTooltip(safeLabel, {
                         permanent: true, direction: 'top', offset: [0, config.showPhotos && hasPhotos ? -(config.photoMarkerSize/2) : -10],
                         className: 'bg-transparent border-none shadow-none font-bold', opacity: 0.9
                     });
