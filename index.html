@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Travel Data Visualizer</title>
+    <link rel="icon" href="data:,">
     
     <!-- React & ReactDOM -->
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -64,7 +65,7 @@
             position: absolute; top: 50%; transform: translateY(-50%); height: 4px; background-color: #3b82f6; border-radius: 2px; z-index: 1;
         }
         .range-input {
-            position: absolute; top: 50%; transform: translateY(-50%); width: 100%; height: 20px; background: none; pointer-events: none; -webkit-appearance: none; z-index: 2; margin: 0;
+            position: absolute; top: 50%; transform: translateY(-50%); width: 100%; height: 20px; background: none; pointer-events: none; -webkit-appearance: none; appearance: none; z-index: 2; margin: 0;
         }
         .range-input::-webkit-slider-thumb {
             -webkit-appearance: none; pointer-events: auto; width: 16px; height: 16px; border-radius: 50%; background: #fff; border: 2px solid #3b82f6; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,0.3);
@@ -322,6 +323,7 @@
             const [totalPoints, setTotalPoints] = useState(100);
             const [openAccordion, setOpenAccordion] = useState('style');
             
+            // New state for crop dimensions to ensure they update correctly
             const [cropBox, setCropBox] = useState({ width: 0, height: 0 });
 
             const initialConfig = {
@@ -356,14 +358,14 @@
                 photoMarkerSize: 50,
 
                 // Export
-                exportFormat: 'screen',
-                exportResolution: 'screen', // 'screen', 2048, 3840, custom
-                customExportWidth: 5000,
+                exportFormat: 'screen', // 'screen' or 'crop' essentially
+                exportResolution: 'screen', // 'screen', 2000, 3840, custom
+                customExportWidth: 5000, // Default for custom input
                 
                 // Crop
                 cropEnabled: false,
-                cropRatio: 'a4_land',
-                cropScale: 0.8,
+                cropRatio: 'a4_land', // free, a4_land, a4_port, 16_9, square
+                cropScale: 0.8, // 0.1 to 1.0 of screen size
             };
 
             const [config, setConfig] = useState(initialConfig);
@@ -507,6 +509,25 @@
 
             useEffect(() => {
                 const map = mapInstanceRef.current;
+                const mapContainer = document.getElementById('map-container');
+                if (!map || !mapContainer) return;
+
+                const refreshMapSize = () => map.invalidateSize({ pan: false });
+                requestAnimationFrame(refreshMapSize);
+
+                if (typeof ResizeObserver === 'undefined') {
+                    window.addEventListener('resize', refreshMapSize);
+                    return () => window.removeEventListener('resize', refreshMapSize);
+                }
+
+                const observer = new ResizeObserver(refreshMapSize);
+                observer.observe(mapContainer);
+
+                return () => observer.disconnect();
+            }, []);
+
+            useEffect(() => {
+                const map = mapInstanceRef.current;
                 if (!map) return;
                 if (tileLayerRef.current) map.removeLayer(tileLayerRef.current);
 
@@ -631,7 +652,18 @@
 
                 const visibleBounds = getLocationBounds(filteredLocations);
                 if (!hasAutoFitRef.current && visibleBounds?.isValid()) {
-                    map.fitBounds(visibleBounds, { padding: [50, 50] });
+                    map.invalidateSize({ pan: false });
+
+                    const southWest = visibleBounds.getSouthWest();
+                    const northEast = visibleBounds.getNorthEast();
+                    const isSinglePoint = southWest.equals(northEast);
+
+                    if (isSinglePoint) {
+                        map.setView(visibleBounds.getCenter(), 10, { animate: false });
+                    } else {
+                        map.fitBounds(visibleBounds, { padding: [50, 50], maxZoom: 11 });
+                    }
+
                     hasAutoFitRef.current = true;
                 }
             }, [tripData, locationsData, photos, config, timeline]); 
@@ -1041,4 +1073,4 @@
         root.render(<App />);
     </script>
 </body>
-</html>
+</html> 
