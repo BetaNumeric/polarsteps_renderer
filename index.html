@@ -19,16 +19,17 @@
     <style>
         body { margin: 0; padding: 0; overflow: hidden; background: #1a1a1a; color: #e5e5e5; }
         #root { height: 100vh; width: 100vw; display: flex; }
-        #map-container { width: 100%; height: 100%; position: relative; z-index: 0; }
+        #map-container { width: 100%; height: 100%; position: relative; z-index: 0; background: var(--map-background, transparent); }
         
         /* Leaflet Overrides for Dark Mode integration */
-        .leaflet-container { background: #1a1a1a; font-family: 'Inter', sans-serif; }
+        .leaflet-container { background: var(--map-background, transparent); font-family: 'Inter', sans-serif; }
         .leaflet-popup-content-wrapper { background: #262626; color: #fff; border-radius: 8px; }
         .leaflet-popup-tip { background: #262626; }
         
         /* Dynamic Tooltip Font Size */
         .leaflet-tooltip { font-size: var(--label-size, 12px) !important; line-height: 1.2 !important; white-space: nowrap; }
 
+        .photo-marker-icon { background: transparent !important; border: none !important; }
         .photo-marker { transition: transform 0.2s, width 0.2s, height 0.2s; border-radius: 50%; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.5), 0 2px 4px -1px rgba(0, 0, 0, 0.3); background-color: #333; }
         .photo-marker:hover { transform: scale(1.2); z-index: 1000 !important; border-color: #3b82f6 !important; }
 
@@ -130,6 +131,29 @@
                 .sort((a, b) => a.time - b.time),
             isDerivedFromSteps: true
         });
+        const createPhotoIcon = (url, size, borderWidth = 2) => L.divIcon({
+            className: 'photo-marker-icon',
+            html: `<div class="photo-marker" style="width:${size}px;height:${size}px;background-image:url('${url}');background-size:cover;background-position:center;border:${borderWidth}px solid white;border-radius:50%;box-shadow:0 4px 6px rgba(0,0,0,0.3);"></div>`,
+            iconSize: [size, size],
+            iconAnchor: [size / 2, size / 2],
+            popupAnchor: [0, -size / 2]
+        });
+        const getAutoMapBackground = tileProvider => String(tileProvider || '').includes('dark') ? '#1a1a1a' : '#ffffff';
+        const getMapBackgroundValue = () => {
+            if (state?.config?.mapBackgroundMode === 'custom') return state.config.mapBackgroundColor || '#ffffff';
+            if (state?.config?.mapBackgroundMode === 'transparent') return 'transparent';
+            return Number(state?.config?.mapOpacity) <= 0 ? 'transparent' : getAutoMapBackground(state?.config?.tileProvider);
+        };
+        const getExportBackgroundValue = () => {
+            const bg = getMapBackgroundValue();
+            return bg === 'transparent' ? null : bg;
+        };
+        const getStepOrderMap = steps => new Map(
+            steps
+                .map((step, index) => ({ step, index, time: Number.isFinite(Number(step?.start_time)) ? Number(step.start_time) : Number.POSITIVE_INFINITY }))
+                .sort((a, b) => (a.time - b.time) || (a.index - b.index))
+                .map(({ step }, index) => [step.id, index + 1])
+        );
         const getLocationBounds = locs => {
             const pts = locs.filter(l => Number.isFinite(l?.lat) && Number.isFinite(l?.lon)).map(l => [l.lat, l.lon]);
             return pts.length ? L.latLngBounds(pts) : null;
@@ -203,9 +227,10 @@
         // --- App State & Map Variables ---
         const initialConfig = {
             tileProvider: 'carto_light', mapLabels: true, mapOpacity: 1, mapSaturation: 100, mapContrast: 100,
+            mapBackgroundMode: 'auto', mapBackgroundColor: '#ffffff',
             routeColor: '#3b82f6', routeWidth: 3, routeOpacity: 0.8,
             detectFlights: true, flightThreshold: 500, flightColor: '#f97316', flightOpacity: 0.8,
-            showSteps: false, stepColor: '#ef4444', stepRadius: 4, stepOpacity: 1, showStepLabels: true, stepLabelSize: 12,
+            showSteps: false, stepColor: '#ef4444', stepRadius: 4, stepOpacity: 1, showStepLabels: false, stepLabelMode: 'name', stepLabelSize: 12,
             showPhotos: true, photoMarkerSize: 50,
             exportFormat: 'screen', exportResolution: 'screen', customExportWidth: 5000,
             cropEnabled: false, cropRatio: 'a4_land', cropScale: 0.8
@@ -270,6 +295,13 @@
                     <span class="text-sm text-gray-400 ${prop==='cropEnabled'?'font-medium text-white flex gap-2':''}">${prop==='cropEnabled'?icons.crop+' ':''}${label}</span>
                     <input type="checkbox" ${state.config[prop]?'checked':''} onchange="updateConfig('${prop}', this.checked)" class="accent-blue-500 ${prop==='cropEnabled'?'accent-green-500 w-4 h-4':''}">
                 </div>`;
+            const renderButtonGroup = (prop, label, options, cols=2) => `
+                <div class="space-y-1 mb-4">
+                    <label class="text-xs uppercase tracking-wider text-gray-500 font-semibold">${label}</label>
+                    <div class="grid gap-2" style="grid-template-columns: repeat(${cols}, minmax(0, 1fr));">
+                        ${options.map(([lbl, val]) => `<button onclick="updateConfig('${prop}', '${val}')" class="text-xs p-2 rounded border ${state.config[prop]===val?'bg-blue-600 border-blue-500 text-white':'bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600'}">${lbl}</button>`).join('')}
+                    </div>
+                </div>`;
             const hasStepData = Array.isArray(state.tripData?.all_steps) && state.tripData.all_steps.length > 0;
             const totalKm = Number.isFinite(Number(state.tripData?.total_km)) ? Number(state.tripData.total_km) : calculateTotalKm(state.locationsData?.locations || []);
             const summaryCount = hasStepData ? `${state.tripData.all_steps.length} steps` : `${state.totalPoints} points`;
@@ -300,6 +332,8 @@
                     ${renderSlider('opacity', 'mapOpacity', 'Opacity', 0, 1, 0.1)}
                     ${renderSlider('saturation', 'mapSaturation', 'Saturation', 0, 200, 10, '%')}
                     ${renderSlider('contrast', 'mapContrast', 'Contrast', 50, 150, 10, '%')}
+                    ${renderButtonGroup('mapBackgroundMode', 'Background', [['Auto', 'auto'], ['Custom', 'custom'], ['Transparent', 'transparent']], 3)}
+                    ${state.config.mapBackgroundMode === 'custom' ? renderColor('mapBackgroundColor', 'Background Color') : ''}
                 </div>`;
 
             let routeBody = `
@@ -324,7 +358,7 @@
                             ${renderCheck('showPhotos', 'Show Photos on Map')}
                             ${state.config.showPhotos ? `<div class="mb-4">${renderSlider('photoSz', 'photoMarkerSize', 'Photo Size', 20, 150, 5, 'px')}</div>` : ''}
                             ${renderCheck('showStepLabels', 'Show Labels')}
-                            ${state.config.showStepLabels ? renderSlider('lblSz', 'stepLabelSize', 'Label Size', 8, 24, 1, 'px') : ''}
+                            ${state.config.showStepLabels ? `${renderButtonGroup('stepLabelMode', 'Label Style', [['Place Name', 'name'], ['Step Number', 'number']])}${renderSlider('lblSz', 'stepLabelSize', 'Label Size', 8, 24, 1, 'px')}` : ''}
                         </div>
                     ` : ''}
                 ` : `<div class="text-sm text-gray-400 bg-gray-800/70 border border-gray-700 rounded p-3">Step labels and photo markers need <span class="font-mono text-gray-300">trip.json</span>. Route rendering and image export still work with <span class="font-mono text-gray-300">locations.json</span> only.</div>`}`;
@@ -475,7 +509,9 @@
         const updateMapOptions = () => {
             if(!map) return;
             if(tileLayer) map.removeLayer(tileLayer);
-            document.getElementById('map-container').style.setProperty('--label-size', state.config.stepLabelSize + 'px');
+            const mapContainer = document.getElementById('map-container');
+            mapContainer.style.setProperty('--label-size', state.config.stepLabelSize + 'px');
+            mapContainer.style.setProperty('--map-background', getMapBackgroundValue());
             const getUrl = (p, l) => {
                 const s = l ? '_all' : '_nolabels';
                 if(p==='carto_light') return `https://{s}.basemaps.cartocdn.com/light${s}/{z}/{x}/{y}{r}.png`;
@@ -513,6 +549,7 @@
 
             if(state.config.showSteps && Array.isArray(state.tripData.all_steps) && state.tripData.all_steps.length) {
                 const sT = locs[0].time, eT = locs[locs.length-1].time;
+                const stepOrderMap = getStepOrderMap(state.tripData.all_steps);
                 state.tripData.all_steps.forEach(step => {
                     const stepTime = Number.isFinite(Number(step?.start_time)) ? Number(step.start_time) : null;
                     if(stepTime !== null && (stepTime < sT || stepTime > eT)) return;
@@ -523,13 +560,15 @@
                     let mk;
                     if(state.config.showPhotos && hasPhotos) {
                         const s = state.config.photoMarkerSize;
-                        const ic = L.divIcon({ html: `<div class="photo-marker" style="width:${s}px;height:${s}px;background-image:url('${state.photos[step.id][0]}');background-size:cover;background-position:center;border:2px solid white;border-radius:50%;box-shadow:0 4px 6px rgba(0,0,0,0.3);"></div>`, iconSize: [s,s], iconAnchor: [s/2,s/2], popupAnchor: [0,-s/2] });
+                        const ic = createPhotoIcon(state.photos[step.id][0], s);
                         mk = L.marker([lat, lon], {icon: ic, _id: step.id, _type: 'photo'});
                     } else {
                         mk = L.circleMarker([lat, lon], {radius: state.config.stepRadius, fillColor: state.config.stepColor, color: '#fff', weight: 1, opacity: 1, fillOpacity: state.config.stepOpacity, renderer: canvasRenderer, _id: step.id, _type: 'circle'});
                     }
                     
                     const label = String(step.display_name || step.name || '').trim() || `Step ${step.id}`;
+                    const stepOrder = stepOrderMap.get(step.id);
+                    const markerLabel = state.config.stepLabelMode === 'number' && Number.isFinite(stepOrder) ? String(stepOrder) : label;
                     const stepDate = stepTime !== null ? new Date(stepTime * 1000).toLocaleDateString() : 'No date';
                     let pop = `<div class="p-2 font-sans"><h3 class="font-bold text-lg mb-1">${escapeHtml(label)}</h3><p class="text-xs text-gray-400 mb-2">${escapeHtml(stepDate)}</p><p class="text-sm">${formatPopupText(step.description)}</p></div>`;
                     if(state.config.showPhotos && hasPhotos) {
@@ -537,7 +576,7 @@
                         pop += `<div class="grid grid-cols-2 gap-1 mt-2">${imgs}</div>`;
                     }
                     mk.bindPopup(pop, {minWidth: 200, maxWidth: 300});
-                    if(state.config.showStepLabels) mk.bindTooltip(escapeHtml(label), {permanent: true, direction: 'top', offset: [0, state.config.showPhotos&&hasPhotos ? -(state.config.photoMarkerSize/2) : -10], className: 'bg-transparent border-none shadow-none font-bold', opacity: 0.9});
+                    if(state.config.showStepLabels) mk.bindTooltip(escapeHtml(markerLabel), {permanent: true, direction: 'top', offset: [0, state.config.showPhotos&&hasPhotos ? -(state.config.photoMarkerSize/2) : -10], className: 'bg-transparent border-none shadow-none font-bold', opacity: 0.9});
                     mk.addTo(markerLayer);
                 });
             }
@@ -571,25 +610,27 @@
             let fw = state.config.exportResolution === 'screen' ? (state.config.cropEnabled ? cf.getBoundingClientRect().width : mc.offsetWidth) : (state.config.exportResolution === 'custom' ? parseInt(state.config.customExportWidth)||3000 : parseInt(state.config.exportResolution));
             let fh = fw / aRatio;
             const scale = fw / ((state.config.cropEnabled?cf.getBoundingClientRect().width:mc.offsetWidth)||1);
+            const exportBackground = getExportBackgroundValue();
 
             const scaleL = (g) => g.eachLayer(l => {
                 if(l instanceof L.Polyline) l.setStyle({ weight: state.config.routeWidth * scale });
                 if(l instanceof L.CircleMarker) l.setRadius(state.config.stepRadius * scale);
                 if(l instanceof L.Marker && l.options._type === 'photo') {
                     const s = state.config.photoMarkerSize * scale;
-                    l.setIcon(L.divIcon({ html: `<div class="photo-marker" style="width:${s}px;height:${s}px;background-image:url('${state.photos[l.options._id][0]}');background-size:cover;background-position:center;border:${2*scale}px solid white;border-radius:50%;box-shadow:0 4px 6px rgba(0,0,0,0.3);"></div>`, iconSize: [s,s], iconAnchor: [s/2,s/2], popupAnchor: [0,-s/2] }));
+                    l.setIcon(createPhotoIcon(state.photos[l.options._id][0], s, 2 * scale));
                 }
                 if(l.getTooltip()) l.bindTooltip(l.getTooltip().getContent(), {...l.getTooltip().options, offset: [0, (l instanceof L.Marker ? -(state.config.photoMarkerSize*scale/2) : -10*scale)]});
             });
 
             scaleL(routeLayer); scaleL(flightLayer); scaleL(markerLayer);
             mc.style.setProperty('--label-size', `${state.config.stepLabelSize * scale}px`);
+            mc.style.setProperty('--map-background', getMapBackgroundValue());
             
             mc.style.width = fw+'px'; mc.style.height = fh+'px'; mc.style.position = 'fixed'; mc.style.top = '0'; mc.style.left = '0'; mc.style.zIndex = '-100';
             map.invalidateSize(); await fitMapToBounds(map, bFit, {padding:[0,0], animate:false}); await waitForLayer(tileLayer);
 
             try {
-                const canvas = await html2canvas(mc, {useCORS: true, allowTaint: false, scale: 1, logging: false, backgroundColor: state.config.tileProvider.includes('dark')?'#1a1a1a':'#ffffff'});
+                const canvas = await html2canvas(mc, {useCORS: true, allowTaint: false, scale: 1, logging: false, backgroundColor: exportBackground});
                 const lnk = document.createElement('a'); lnk.download = `polarsteps-map-${Date.now()}.png`; lnk.href = canvas.toDataURL('image/png'); lnk.click();
             } catch(e) { console.error(e); alert("Export failed"); }
             
@@ -601,7 +642,7 @@
                 if(l instanceof L.CircleMarker) l.setRadius(state.config.stepRadius);
                 if(l instanceof L.Marker && l.options._type === 'photo') {
                     const s = state.config.photoMarkerSize;
-                    l.setIcon(L.divIcon({ html: `<div class="photo-marker" style="width:${s}px;height:${s}px;background-image:url('${state.photos[l.options._id][0]}');background-size:cover;background-position:center;border:2px solid white;border-radius:50%;box-shadow:0 4px 6px rgba(0,0,0,0.3);"></div>`, iconSize: [s,s], iconAnchor: [s/2,s/2], popupAnchor: [0,-s/2] }));
+                    l.setIcon(createPhotoIcon(state.photos[l.options._id][0], s));
                 }
                 if(l.getTooltip()) l.bindTooltip(l.getTooltip().getContent(), {...l.getTooltip().options, offset: [0, (l instanceof L.Marker ? -(state.config.photoMarkerSize/2) : -10)]});
             });

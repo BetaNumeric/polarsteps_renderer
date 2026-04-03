@@ -8,8 +8,8 @@ A small browser-based tool for turning an exported Polarsteps trip into a custom
 
 - Load a full exported Polarsteps trip folder, just `locations.json`, or just `trip.json`, directly in the browser
 - Render the trip route on different base maps
-- Adjust map labels, opacity, saturation, and contrast
-- Show steps as markers or photo thumbnails, with optional labels
+- Adjust map labels, opacity, saturation, contrast, and background color
+- Show steps as markers or photo thumbnails, with optional place-name or step-number labels
 - Detect long jumps as flights and style them separately
 - Limit the visible route with the timeline range
 - Export the result as a PNG with screen, A4, poster, square, 16:9, 2K, 4K, or custom-width output
