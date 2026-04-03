@@ -158,6 +158,33 @@
             const pts = locs.filter(l => Number.isFinite(l?.lat) && Number.isFinite(l?.lon)).map(l => [l.lat, l.lon]);
             return pts.length ? L.latLngBounds(pts) : null;
         };
+        const getVisibleLocations = () => {
+            if (!Array.isArray(state?.locationsData?.locations)) return [];
+            return state.locationsData.locations.slice(
+                Math.max(0, state.timeline[0]),
+                Math.min(state.locationsData.locations.length, state.timeline[1])
+            );
+        };
+        const getRouteSegments = (locs) => {
+            let currentPath = [];
+            const groundPaths = [];
+            const flightPaths = [];
+            for (let i = 0; i < locs.length; i++) {
+                const current = locs[i];
+                currentPath.push([current.lat, current.lon]);
+                if (i < locs.length - 1) {
+                    const next = locs[i + 1];
+                    const dist = getHaversineDistance(current, next);
+                    if (state.config.detectFlights && dist > state.config.flightThreshold) {
+                        if (currentPath.length > 1) groundPaths.push([...currentPath]);
+                        currentPath = [];
+                        flightPaths.push(getGreatCirclePoints(current, next));
+                    }
+                }
+            }
+            if (currentPath.length > 1) groundPaths.push(currentPath);
+            return { groundPaths, flightPaths };
+        };
         const escapeHtml = v => String(v||'').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
         const normalizeSearchToken = v => String(v||'').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
         const formatPopupText = v => escapeHtml(v).replace(/\r?\n/g, '<br />');
@@ -388,9 +415,14 @@
                             <option value="poster" ${state.config.exportFormat==='poster'?'selected':''}>Poster</option>
                         </select>
                     </div>`}
-                <button onclick="handleExport()" ${state.loading?'disabled':''} class="w-full mt-6 bg-green-600 hover:bg-green-500 text-white font-bold py-3 rounded flex items-center justify-center gap-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-green-900/20">
-                    ${state.loading ? '<div class="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>' : icons.download} Capture & Download
-                </button>`;
+                <div class="grid grid-cols-2 gap-3 mt-6">
+                    <button onclick="handleExport()" ${state.loading?'disabled':''} class="bg-green-600 hover:bg-green-500 text-white font-bold py-3 rounded flex items-center justify-center gap-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-green-900/20">
+                        ${state.loading ? '<div class="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>' : icons.download} PNG
+                    </button>
+                    <button onclick="handleSvgExport()" ${state.loading?'disabled':''} class="bg-slate-700 hover:bg-slate-600 text-white font-bold py-3 rounded flex items-center justify-center gap-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed border border-slate-600">
+                        ${icons.download} Route SVG
+                    </button>
+                </div>`;
 
             sidebar.innerHTML = `
                 <div class="p-5 border-b border-gray-700">
@@ -528,21 +560,10 @@
             if(!map) return;
             routeLayer.clearLayers(); flightLayer.clearLayers(); markerLayer.clearLayers();
             if(!state.tripData || !state.locationsData) return;
-            const locs = state.locationsData.locations.slice(Math.max(0, state.timeline[0]), Math.min(state.locationsData.locations.length, state.timeline[1]));
+            const locs = getVisibleLocations();
             if(!locs.length) return;
 
-            let curPath = [], gp = [], fp = [];
-            for (let i = 0; i < locs.length; i++) {
-                const cur = locs[i]; curPath.push([cur.lat, cur.lon]);
-                if (i < locs.length - 1) {
-                    const dist = getHaversineDistance(cur, locs[i+1]);
-                    if (state.config.detectFlights && dist > state.config.flightThreshold) {
-                        if(curPath.length > 1) gp.push([...curPath]);
-                        curPath = []; fp.push(getGreatCirclePoints(cur, locs[i+1]));
-                    }
-                }
-            }
-            if(curPath.length > 1) gp.push(curPath);
+            const { groundPaths: gp, flightPaths: fp } = getRouteSegments(locs);
 
             if(gp.length) L.polyline(gp, { color: state.config.routeColor, weight: state.config.routeWidth, opacity: state.config.routeOpacity, lineJoin: 'round', lineCap: 'round', renderer: canvasRenderer }).addTo(routeLayer);
             if(fp.length) fp.forEach(p => L.polyline(p, { color: state.config.flightColor, weight: state.config.routeWidth, opacity: state.config.flightOpacity, dashArray: '5, 10', renderer: canvasRenderer }).addTo(flightLayer));
@@ -588,6 +609,55 @@
                 else map.fitBounds(bounds, {padding: [50,50], maxZoom: 11});
                 state.hasAutoFit = true;
             }
+        };
+
+        window.handleSvgExport = () => {
+            const mc = document.getElementById('map-container');
+            const cf = document.getElementById('crop-frame');
+            if(!mc || !map || !state.tripData || !state.locationsData) return;
+
+            const locs = getVisibleLocations();
+            if(!locs.length) return alert('No route to export.');
+
+            const { groundPaths, flightPaths } = getRouteSegments(locs);
+            if(!groundPaths.length && !flightPaths.length) return alert('No route to export.');
+
+            const mapRect = mc.getBoundingClientRect();
+            const frameRect = state.config.cropEnabled && cf ? cf.getBoundingClientRect() : mapRect;
+            const offsetX = frameRect.left - mapRect.left;
+            const offsetY = frameRect.top - mapRect.top;
+            const width = Math.max(1, Math.round(frameRect.width));
+            const height = Math.max(1, Math.round(frameRect.height));
+            const toPointString = ([lat, lon]) => {
+                const pt = map.latLngToContainerPoint([lat, lon]);
+                const x = (pt.x - offsetX).toFixed(2);
+                const y = (pt.y - offsetY).toFixed(2);
+                return `${x} ${y}`;
+            };
+            const toPathData = (path) => path.map((point, index) => `${index===0?'M':'L'} ${toPointString(point)}`).join(' ');
+            const svgParts = [
+                '<?xml version="1.0" encoding="UTF-8"?>',
+                `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" fill="none">`
+            ];
+
+            groundPaths.forEach(path => {
+                if (path.length < 2) return;
+                svgParts.push(`<path d="${toPathData(path)}" stroke="${escapeHtml(state.config.routeColor)}" stroke-width="${state.config.routeWidth}" stroke-opacity="${state.config.routeOpacity}" stroke-linecap="round" stroke-linejoin="round" fill="none" />`);
+            });
+            flightPaths.forEach(path => {
+                if (path.length < 2) return;
+                svgParts.push(`<path d="${toPathData(path)}" stroke="${escapeHtml(state.config.flightColor)}" stroke-width="${state.config.routeWidth}" stroke-opacity="${state.config.flightOpacity}" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="5 10" fill="none" />`);
+            });
+
+            svgParts.push('</svg>');
+
+            const blob = new Blob([svgParts.join('\n')], { type: 'image/svg+xml;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.download = `polarsteps-route-${Date.now()}.svg`;
+            link.href = url;
+            link.click();
+            setTimeout(() => URL.revokeObjectURL(url), 0);
         };
 
         window.handleExport = async () => {

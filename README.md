@@ -12,7 +12,7 @@ A small browser-based tool for turning an exported Polarsteps trip into a custom
 - Show steps as markers or photo thumbnails, with optional place-name or step-number labels
 - Detect long jumps as flights and style them separately
 - Limit the visible route with the timeline range
-- Export the result as a PNG with screen, A4, poster, square, 16:9, 2K, 4K, or custom-width output
+- Export the current map as a PNG or the current route path as a simple SVG
 
 ## How To Use It
 
