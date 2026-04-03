@@ -118,6 +118,18 @@
             all_steps: [],
             isDerivedFromLocations: true
         });
+        const createLocationsFromSteps = steps => ({
+            locations: steps
+                .map((step, idx) => ({
+                    lat: Number(step?.location?.lat),
+                    lon: Number(step?.location?.lon),
+                    time: Number.isFinite(Number(step?.start_time)) ? Number(step.start_time) : idx,
+                    stepId: step?.id ?? idx
+                }))
+                .filter(loc => Number.isFinite(loc.lat) && Number.isFinite(loc.lon))
+                .sort((a, b) => a.time - b.time),
+            isDerivedFromSteps: true
+        });
         const getLocationBounds = locs => {
             const pts = locs.filter(l => Number.isFinite(l?.lat) && Number.isFinite(l?.lon)).map(l => [l.lat, l.lon]);
             return pts.length ? L.latLngBounds(pts) : null;
@@ -220,7 +232,7 @@
                         <div class="p-4 bg-gray-700 rounded-full text-gray-400">${icons.upload}</div>
                         <div>
                             <h3 class="font-medium text-gray-200">Upload Trip Data</h3>
-                            <p class="text-xs text-gray-400 mt-1 mb-4">Choose a folder or file list containing <span class="font-mono text-gray-300">locations.json</span>. <span class="font-mono text-gray-300">trip.json</span> and photos are optional.</p>
+                            <p class="text-xs text-gray-400 mt-1 mb-4">Choose a folder or file list containing <span class="font-mono text-gray-300">locations.json</span> and/or <span class="font-mono text-gray-300">trip.json</span>. At least one is required; photos are optional.</p>
                             <div class="flex flex-wrap items-center justify-center gap-2">
                                 <label class="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded text-sm cursor-pointer transition-colors">
                                     Select Folder
@@ -355,7 +367,7 @@
                     <div class="p-4 bg-blue-900/20 border-b border-blue-900/50">
                         <h3 class="font-bold text-blue-100">${state.tripData.name}</h3>
                         <div class="flex justify-between text-xs text-blue-300 mt-1"><span>${totalKm.toFixed(0)} km</span><span>${summaryCount}</span></div>
-                        ${state.tripData.isDerivedFromLocations ? `<p class="text-[11px] text-blue-300/80 mt-2">Loaded from <span class="font-mono">locations.json</span> only.</p>` : ''}
+                        ${state.tripData.isDerivedFromLocations ? `<p class="text-[11px] text-blue-300/80 mt-2">Loaded from <span class="font-mono">locations.json</span> only.</p>` : state.locationsData?.isDerivedFromSteps ? `<p class="text-[11px] text-blue-300/80 mt-2">Route approximated from step locations in <span class="font-mono">trip.json</span>.</p>` : ''}
                     </div>
                     <div class="border-b border-gray-700">${accHeader('timeline', 'Timeline & Crop', 'clock')}${accBody('timeline', timelineBody)}</div>
                     <div class="border-b border-gray-700">${accHeader('style', 'Map Style', 'image')}${accBody('style', styleBody)}</div>
@@ -415,11 +427,13 @@
                     if (file.name === 'trip.json' || file.name.endsWith('/trip.json')) fdTrip = JSON.parse(await file.text());
                     else if (file.name === 'locations.json' || file.name.endsWith('/locations.json')) fdLocations = JSON.parse(await file.text());
                 }
-                if (!fdLocations) throw new Error("Could not find locations.json.");
+                if (!fdTrip && !fdLocations) throw new Error("Could not find trip.json or locations.json.");
                 
                 const allSteps = Array.isArray(fdTrip?.all_steps) ? fdTrip.all_steps.map(s => ({...s, id: Number(s.id)})).filter(s => Number.isFinite(s.id)) : [];
-                const sortedLocs = Array.isArray(fdLocations.locations) ? [...fdLocations.locations].sort((a,b)=>a.time-b.time) : [];
-                if (!sortedLocs.length) throw new Error("No locations found.");
+                const sortedLocs = Array.isArray(fdLocations?.locations) ? [...fdLocations.locations].sort((a,b)=>(Number(a?.time) || 0) - (Number(b?.time) || 0)) : [];
+                const derivedLocationsData = createLocationsFromSteps(allSteps);
+                const resolvedLocationsData = sortedLocs.length ? {...fdLocations, locations: sortedLocs, isDerivedFromSteps: false} : (derivedLocationsData.locations.length ? derivedLocationsData : null);
+                if (!resolvedLocationsData) throw new Error("No usable route points found in locations.json or trip.json.");
 
                 const stepMatchers = buildPhotoStepMatchers(allSteps);
                 for (const file of Array.from(files)) {
@@ -432,11 +446,11 @@
                     }
                 }
                 Object.values(state.photos).flat().forEach(u => URL.revokeObjectURL(u));
-                state.tripData = fdTrip ? {...fdTrip, all_steps: allSteps, isDerivedFromLocations: false} : createFallbackTripData(files, sortedLocs);
-                state.locationsData = {...fdLocations, locations: sortedLocs};
+                state.tripData = fdTrip ? {...fdTrip, all_steps: allSteps, isDerivedFromLocations: false} : createFallbackTripData(files, resolvedLocationsData.locations);
+                state.locationsData = resolvedLocationsData;
                 state.photos = newPhotos;
-                state.totalPoints = sortedLocs.length;
-                state.timeline = [0, sortedLocs.length];
+                state.totalPoints = resolvedLocationsData.locations.length;
+                state.timeline = [0, resolvedLocationsData.locations.length];
                 state.openAccordion = 'style';
                 state.hasAutoFit = false;
             } catch(err) {
@@ -500,7 +514,8 @@
             if(state.config.showSteps && Array.isArray(state.tripData.all_steps) && state.tripData.all_steps.length) {
                 const sT = locs[0].time, eT = locs[locs.length-1].time;
                 state.tripData.all_steps.forEach(step => {
-                    if(step.start_time < sT || step.start_time > eT) return;
+                    const stepTime = Number.isFinite(Number(step?.start_time)) ? Number(step.start_time) : null;
+                    if(stepTime !== null && (stepTime < sT || stepTime > eT)) return;
                     const lat = Number(step?.location?.lat), lon = Number(step?.location?.lon);
                     if(!Number.isFinite(lat) || !Number.isFinite(lon)) return;
                     const hasPhotos = state.photos[step.id] && state.photos[step.id].length > 0;
@@ -515,7 +530,8 @@
                     }
                     
                     const label = String(step.display_name || step.name || '').trim() || `Step ${step.id}`;
-                    let pop = `<div class="p-2 font-sans"><h3 class="font-bold text-lg mb-1">${escapeHtml(label)}</h3><p class="text-xs text-gray-400 mb-2">${escapeHtml(new Date(step.start_time*1000).toLocaleDateString())}</p><p class="text-sm">${formatPopupText(step.description)}</p></div>`;
+                    const stepDate = stepTime !== null ? new Date(stepTime * 1000).toLocaleDateString() : 'No date';
+                    let pop = `<div class="p-2 font-sans"><h3 class="font-bold text-lg mb-1">${escapeHtml(label)}</h3><p class="text-xs text-gray-400 mb-2">${escapeHtml(stepDate)}</p><p class="text-sm">${formatPopupText(step.description)}</p></div>`;
                     if(state.config.showPhotos && hasPhotos) {
                         const imgs = state.photos[step.id].slice(0,4).map(u => `<img src="${escapeHtml(u)}" class="w-full h-32 object-cover rounded mb-1" />`).join('');
                         pop += `<div class="grid grid-cols-2 gap-1 mt-2">${imgs}</div>`;
