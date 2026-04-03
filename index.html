@@ -185,6 +185,40 @@
             if (currentPath.length > 1) groundPaths.push(currentPath);
             return { groundPaths, flightPaths };
         };
+        const getTimelinePercent = (value) => state.totalPoints ? (value / state.totalPoints) * 100 : 0;
+        const syncTimelineControls = () => {
+            const highlight = document.querySelector('[data-timeline-highlight]');
+            if (highlight) {
+                highlight.style.left = `${getTimelinePercent(state.timeline[0])}%`;
+                highlight.style.width = `${getTimelinePercent(state.timeline[1] - state.timeline[0])}%`;
+            }
+            document.querySelectorAll('[data-timeline-range]').forEach(input => {
+                const idx = parseInt(input.getAttribute('data-timeline-range'), 10);
+                input.value = state.timeline[idx];
+            });
+            document.querySelectorAll('[data-timeline-number]').forEach(input => {
+                const idx = parseInt(input.getAttribute('data-timeline-number'), 10);
+                input.value = state.timeline[idx];
+            });
+        };
+        const syncCropFrame = () => {
+            const mapContainer = document.getElementById('map-container');
+            const cropOverlay = document.getElementById('crop-overlay');
+            const cropFrame = document.getElementById('crop-frame');
+            if(!mapContainer || !cropOverlay || !cropFrame) return;
+            if(state.config.cropEnabled) {
+                cropOverlay.classList.remove('hidden');
+                const w = mapContainer.offsetWidth, h = mapContainer.offsetHeight;
+                const ratio = getAspectRatio(state.config.cropRatio) || (16/9);
+                let bw = w * state.config.cropScale, bh = bw / ratio;
+                if(bh > h * state.config.cropScale) { bh = h * state.config.cropScale; bw = bh * ratio; }
+                cropFrame.style.width = bw + 'px';
+                cropFrame.style.height = bh + 'px';
+            } else {
+                cropOverlay.classList.remove('hidden');
+                cropOverlay.classList.add('hidden');
+            }
+        };
         const escapeHtml = v => String(v||'').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
         const normalizeSearchToken = v => String(v||'').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
         const formatPopupText = v => escapeHtml(v).replace(/\r?\n/g, '<br />');
@@ -253,10 +287,10 @@
 
         // --- App State & Map Variables ---
         const initialConfig = {
-            tileProvider: 'carto_light', mapLabels: true, mapOpacity: 1, mapSaturation: 100, mapContrast: 100,
+            tileProvider: 'carto_light', mapLabels: true, mapOpacity: 1, mapSaturation: 100,
             mapBackgroundMode: 'auto', mapBackgroundColor: '#ffffff',
-            routeColor: '#3b82f6', routeWidth: 3, routeOpacity: 0.8,
-            detectFlights: true, flightThreshold: 500, flightColor: '#f97316', flightOpacity: 0.8,
+            routeColor: '#3b82f6', routeWidth: 3, routeOpacity: 1,
+            detectFlights: true, flightThreshold: 500, flightColor: '#f97316', flightOpacity: 1,
             showSteps: false, stepColor: '#ef4444', stepRadius: 4, stepOpacity: 1, showStepLabels: false, stepLabelMode: 'name', stepLabelSize: 12,
             showPhotos: true, photoMarkerSize: 50,
             exportFormat: 'screen', exportResolution: 'screen', customExportWidth: 5000,
@@ -311,7 +345,7 @@
             const renderSlider = (id, prop, label, min, max, step, unit='') => `
                 <div class="space-y-1">
                     <div class="flex justify-between text-sm"><span class="text-gray-400">${label}</span><span class="text-gray-500">${state.config[prop]}${unit}</span></div>
-                    <input type="range" min="${min}" max="${max}" step="${step}" value="${state.config[prop]}" oninput="updateConfig('${prop}', parseFloat(this.value))" onchange="updateConfig('${prop}', parseFloat(this.value))" class="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-500">
+                    <input type="range" min="${min}" max="${max}" step="${step}" value="${state.config[prop]}" oninput="handleSliderInput(this, '${prop}', parseFloat(this.value), '${unit}')" onchange="updateConfig('${prop}', parseFloat(this.value))" class="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-500">
                 </div>`;
             const renderColor = (prop, label) => `
                 <div class="flex items-center justify-between"><span class="text-sm text-gray-400">${label}</span>
@@ -336,14 +370,14 @@
             let timelineBody = `
                 <div class="py-2 space-y-2">
                     <div class="flex justify-between text-xs text-gray-400">
-                        <div class="flex flex-col gap-1"><span class="text-[10px] uppercase text-gray-500">Start</span><input type="number" value="${state.timeline[0]}" onchange="updateTimeline(0, parseInt(this.value))" class="w-20 bg-gray-700 border border-gray-600 rounded px-2 py-1 text-center text-white focus:border-blue-500 outline-none"></div>
-                        <div class="flex flex-col gap-1 items-end"><span class="text-[10px] uppercase text-gray-500">End</span><input type="number" value="${state.timeline[1]}" onchange="updateTimeline(1, parseInt(this.value))" class="w-20 bg-gray-700 border border-gray-600 rounded px-2 py-1 text-center text-white focus:border-blue-500 outline-none"></div>
+                        <div class="flex flex-col gap-1"><span class="text-[10px] uppercase text-gray-500">Start</span><input type="number" value="${state.timeline[0]}" data-timeline-number="0" onchange="updateTimeline(0, parseInt(this.value))" class="w-20 bg-gray-700 border border-gray-600 rounded px-2 py-1 text-center text-white focus:border-blue-500 outline-none"></div>
+                        <div class="flex flex-col gap-1 items-end"><span class="text-[10px] uppercase text-gray-500">End</span><input type="number" value="${state.timeline[1]}" data-timeline-number="1" onchange="updateTimeline(1, parseInt(this.value))" class="w-20 bg-gray-700 border border-gray-600 rounded px-2 py-1 text-center text-white focus:border-blue-500 outline-none"></div>
                     </div>
                     <div class="range-slider-container mt-2">
                         <div class="range-track"></div>
-                        <div class="range-highlight" style="left: ${(state.timeline[0]/state.totalPoints)*100}%; width: ${((state.timeline[1]-state.timeline[0])/state.totalPoints)*100}%"></div>
-                        <input type="range" min="0" max="${state.totalPoints}" value="${state.timeline[0]}" oninput="updateTimeline(0, parseInt(this.value))" class="range-input">
-                        <input type="range" min="0" max="${state.totalPoints}" value="${state.timeline[1]}" oninput="updateTimeline(1, parseInt(this.value))" class="range-input">
+                        <div class="range-highlight" data-timeline-highlight style="left: ${getTimelinePercent(state.timeline[0])}%; width: ${getTimelinePercent(state.timeline[1]-state.timeline[0])}%"></div>
+                        <input type="range" min="0" max="${state.totalPoints}" value="${state.timeline[0]}" data-timeline-range="0" oninput="updateTimeline(0, parseInt(this.value), false)" onchange="updateTimeline(0, parseInt(this.value))" class="range-input">
+                        <input type="range" min="0" max="${state.totalPoints}" value="${state.timeline[1]}" data-timeline-range="1" oninput="updateTimeline(1, parseInt(this.value), false)" onchange="updateTimeline(1, parseInt(this.value))" class="range-input">
                     </div>
                     <p class="text-[10px] text-gray-500 mt-4 text-center">Type numbers to fine-tune start/end points.</p>
                 </div>`;
@@ -358,7 +392,6 @@
                 <div class="space-y-4 pt-2 border-t border-gray-700">
                     ${renderSlider('opacity', 'mapOpacity', 'Opacity', 0, 1, 0.1)}
                     ${renderSlider('saturation', 'mapSaturation', 'Saturation', 0, 200, 10, '%')}
-                    ${renderSlider('contrast', 'mapContrast', 'Contrast', 50, 150, 10, '%')}
                     ${renderButtonGroup('mapBackgroundMode', 'Background', [['Auto', 'auto'], ['Custom', 'custom'], ['Transparent', 'transparent']], 3)}
                     ${state.config.mapBackgroundMode === 'custom' ? renderColor('mapBackgroundColor', 'Background Color') : ''}
                 </div>`;
@@ -447,30 +480,29 @@
                     </div>
                 </div>`;
             
-            // Sync Map Crop
-            const mapContainer = document.getElementById('map-container');
-            const cropOverlay = document.getElementById('crop-overlay');
-            const cropFrame = document.getElementById('crop-frame');
-            if(state.config.cropEnabled) {
-                cropOverlay.classList.remove('hidden');
-                const w = mapContainer.offsetWidth, h = mapContainer.offsetHeight;
-                const ratio = getAspectRatio(state.config.cropRatio) || (16/9);
-                let bw = w * state.config.cropScale, bh = bw / ratio;
-                if(bh > h * state.config.cropScale) { bh = h * state.config.cropScale; bw = bh * ratio; }
-                cropFrame.style.width = bw + 'px'; cropFrame.style.height = bh + 'px';
-            } else {
-                cropOverlay.classList.remove('hidden');
-                cropOverlay.classList.add('hidden');
-            }
+            syncCropFrame();
         };
 
         // --- Application Handlers ---
         window.toggleAccordion = (id) => { state.openAccordion = state.openAccordion === id ? '' : id; updateSidebar(); };
-        window.updateConfig = (prop, val) => { state.config[prop] = val; updateSidebar(); updateMapOptions(); drawMapData(); };
-        window.updateTimeline = (idx, val) => {
+        window.handleSliderInput = (input, prop, val, unit='') => {
+            const valueLabel = input?.previousElementSibling?.lastElementChild;
+            if (valueLabel) valueLabel.textContent = `${input.value}${unit}`;
+            window.updateConfig(prop, val, false);
+        };
+        window.updateConfig = (prop, val, refreshSidebar=true) => {
+            state.config[prop] = val;
+            if(refreshSidebar) updateSidebar();
+            else syncCropFrame();
+            updateMapOptions();
+            drawMapData();
+        };
+        window.updateTimeline = (idx, val, refreshSidebar=true) => {
             const limit = idx === 0 ? Math.min(val, state.timeline[1]-1) : Math.max(val, state.timeline[0]+1);
             state.timeline[idx] = Math.max(0, Math.min(limit, state.totalPoints));
-            updateSidebar(); drawMapData();
+            if(refreshSidebar) updateSidebar();
+            else syncTimelineControls();
+            drawMapData();
         };
         window.resetConfig = () => { state.config = {...initialConfig}; updateSidebar(); updateMapOptions(); drawMapData(); };
         window.resetTrip = () => {
@@ -553,7 +585,7 @@
                 return `https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png`;
             };
             tileLayer = L.tileLayer(getUrl(state.config.tileProvider, state.config.mapLabels), { opacity: state.config.mapOpacity, crossOrigin: 'anonymous', maxZoom: 19 }).addTo(map);
-            tileLayer.on('load', () => { const c = tileLayer.getContainer(); if(c) c.style.filter = `saturate(${state.config.mapSaturation}%) contrast(${state.config.mapContrast}%)`; });
+            tileLayer.on('load', () => { const c = tileLayer.getContainer(); if(c) c.style.filter = `saturate(${state.config.mapSaturation}%)`; });
         };
 
         const drawMapData = () => {
