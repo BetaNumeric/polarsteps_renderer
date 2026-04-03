@@ -55,6 +55,12 @@
                 <div id="loading" class="absolute inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center flex-col text-white hidden">
                     <div class="loader mb-4"></div><p class="font-medium animate-pulse">Generating High-Res Map...</p>
                 </div>
+                <div id="country-loading-indicator" class="absolute top-4 right-4 z-40 hidden pointer-events-none">
+                    <div class="flex items-center gap-2 rounded-full border border-blue-900/40 bg-gray-950/85 px-3 py-2 text-xs text-blue-100 shadow-lg backdrop-blur-sm">
+                        <div class="w-3 h-3 border-2 border-blue-200/40 border-t-blue-300 rounded-full animate-spin"></div>
+                        <span id="country-loading-text">Loading country boundaries...</span>
+                    </div>
+                </div>
                 <div id="crop-overlay" class="crop-overlay hidden">
                     <div id="crop-frame" class="crop-frame" style="width: 0px; height: 0px;"></div>
                 </div>
@@ -125,7 +131,8 @@
                     lat: Number(step?.location?.lat),
                     lon: Number(step?.location?.lon),
                     time: Number.isFinite(Number(step?.start_time)) ? Number(step.start_time) : idx,
-                    stepId: step?.id ?? idx
+                    stepId: step?.id ?? idx,
+                    countryCode: String(step?.location?.country_code || '').trim().toUpperCase() || null
                 }))
                 .filter(loc => Number.isFinite(loc.lat) && Number.isFinite(loc.lon))
                 .sort((a, b) => a.time - b.time),
@@ -154,6 +161,248 @@
                 .sort((a, b) => (a.time - b.time) || (a.index - b.index))
                 .map(({ step }, index) => [step.id, index + 1])
         );
+        const COUNTRY_BOUNDARY_SOURCES = {
+            low: {
+                label: 'Low',
+                resolution: '110m',
+                description: 'Fastest, most simplified',
+                url: 'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_admin_0_countries.geojson'
+            },
+            medium: {
+                label: 'Medium',
+                resolution: '50m',
+                description: 'Better balance of shape and speed',
+                url: 'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_admin_0_countries.geojson'
+            },
+            high: {
+                label: 'High',
+                resolution: '10m',
+                description: 'Most detailed, heaviest download',
+                url: 'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_10m_admin_0_countries.geojson'
+            }
+        };
+        const getCountryBoundarySource = (detail = state?.config?.countryBoundaryDetail) => COUNTRY_BOUNDARY_SOURCES[detail] || COUNTRY_BOUNDARY_SOURCES.medium;
+        const getCountryBoundaryDetailKey = (detail = state?.config?.countryBoundaryDetail) => Object.keys(COUNTRY_BOUNDARY_SOURCES).find(key => COUNTRY_BOUNDARY_SOURCES[key] === getCountryBoundarySource(detail)) || 'medium';
+        const normalizeCountryCode = v => {
+            const code = String(v || '').trim().toUpperCase();
+            return /^[A-Z]{2}$/.test(code) ? code : '';
+        };
+        const normalizeCountryName = v => String(v || '')
+            .normalize('NFKD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+        const createBBox = () => [Infinity, Infinity, -Infinity, -Infinity];
+        const extendBBox = (bbox, lon, lat) => {
+            if (!Number.isFinite(lon) || !Number.isFinite(lat)) return bbox;
+            bbox[0] = Math.min(bbox[0], lon);
+            bbox[1] = Math.min(bbox[1], lat);
+            bbox[2] = Math.max(bbox[2], lon);
+            bbox[3] = Math.max(bbox[3], lat);
+            return bbox;
+        };
+        const finalizeBBox = bbox => bbox?.every(Number.isFinite) ? bbox : null;
+        const collectBBoxFromCoordinates = (coords, bbox = createBBox()) => {
+            if (!Array.isArray(coords)) return bbox;
+            if (typeof coords[0] === 'number' && typeof coords[1] === 'number') return extendBBox(bbox, Number(coords[0]), Number(coords[1]));
+            coords.forEach(part => collectBBoxFromCoordinates(part, bbox));
+            return bbox;
+        };
+        const getGeometryBBox = geometry => finalizeBBox(collectBBoxFromCoordinates(geometry?.coordinates));
+        const isPointInBBox = (lon, lat, bbox) => !!bbox && lon >= bbox[0] && lon <= bbox[2] && lat >= bbox[1] && lat <= bbox[3];
+        const isPointInRing = (lon, lat, ring) => {
+            let inside = false;
+            for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+                const xi = Number(ring[i]?.[0]), yi = Number(ring[i]?.[1]);
+                const xj = Number(ring[j]?.[0]), yj = Number(ring[j]?.[1]);
+                if (![xi, yi, xj, yj].every(Number.isFinite)) continue;
+                const intersects = ((yi > lat) !== (yj > lat)) && (lon < ((xj - xi) * (lat - yi)) / ((yj - yi) || Number.EPSILON) + xi);
+                if (intersects) inside = !inside;
+            }
+            return inside;
+        };
+        const polygonContainsPoint = (lon, lat, rings) => {
+            if (!Array.isArray(rings) || !rings.length || !isPointInRing(lon, lat, rings[0])) return false;
+            for (let i = 1; i < rings.length; i++) {
+                if (isPointInRing(lon, lat, rings[i])) return false;
+            }
+            return true;
+        };
+        const getCountryFeatureCode = props => [
+            props?.ISO_A2_EH,
+            props?.ISO_A2,
+            props?.WB_A2,
+            props?.POSTAL
+        ].map(normalizeCountryCode).find(Boolean) || '';
+        const getCountryFeatureName = props => String(
+            props?.NAME_EN ||
+            props?.NAME_LONG ||
+            props?.ADMIN ||
+            props?.NAME ||
+            props?.FORMAL_EN ||
+            props?.BRK_NAME ||
+            'Unknown Country'
+        ).trim();
+        const getCountryFeatureLookupKeys = props => {
+            const aliases = [
+                getCountryFeatureCode(props),
+                normalizeCountryCode(props?.ISO_A2_EH),
+                normalizeCountryCode(props?.ISO_A2),
+                normalizeCountryCode(props?.WB_A2),
+                normalizeCountryCode(props?.POSTAL),
+                String(props?.ISO_A3_EH || '').trim().toUpperCase(),
+                String(props?.ISO_A3 || '').trim().toUpperCase(),
+                String(props?.ADM0_A3 || '').trim().toUpperCase(),
+                normalizeCountryName(props?.ADMIN),
+                normalizeCountryName(props?.NAME),
+                normalizeCountryName(props?.NAME_LONG),
+                normalizeCountryName(props?.FORMAL_EN),
+                normalizeCountryName(props?.NAME_EN),
+                normalizeCountryName(props?.BRK_NAME),
+                normalizeCountryName(props?.NAME_SORT)
+            ].filter(Boolean);
+            return [...new Set(aliases)];
+        };
+        const createCountryFeatureEntry = feature => {
+            const geometry = feature?.geometry;
+            const props = feature?.properties || {};
+            if (!geometry || !Array.isArray(geometry.coordinates)) return null;
+            const polygons = geometry.type === 'Polygon'
+                ? [{ rings: geometry.coordinates, bbox: finalizeBBox(collectBBoxFromCoordinates(geometry.coordinates)) }]
+                : geometry.type === 'MultiPolygon'
+                    ? geometry.coordinates.map(rings => ({ rings, bbox: finalizeBBox(collectBBoxFromCoordinates(rings)) }))
+                    : [];
+            if (!polygons.length) return null;
+            const code = getCountryFeatureCode(props);
+            const name = getCountryFeatureName(props);
+            const key = code || normalizeCountryName(name);
+            if (!key) return null;
+            return {
+                key,
+                code,
+                name,
+                bbox: Array.isArray(feature?.bbox) && feature.bbox.length === 4 ? feature.bbox : getGeometryBBox(geometry),
+                polygons,
+                feature: {
+                    ...feature,
+                    properties: {
+                        ...props,
+                        __countryKey: key,
+                        __countryCode: code,
+                        __countryName: name
+                    }
+                },
+                lookupKeys: getCountryFeatureLookupKeys(props)
+            };
+        };
+        const buildCountryGeometryIndex = geojson => {
+            const features = Array.isArray(geojson?.features) ? geojson.features.map(createCountryFeatureEntry).filter(Boolean) : [];
+            const byKey = new Map();
+            const lookup = new Map();
+            features.forEach(entry => {
+                byKey.set(entry.key, entry);
+                entry.lookupKeys.forEach(alias => {
+                    if (alias && !lookup.has(alias)) lookup.set(alias, entry);
+                });
+            });
+            return { features, byKey, lookup };
+        };
+        const getActiveCountryGeometryIndex = (detail = state?.config?.countryBoundaryDetail) => countryGeometryCache.get(getCountryBoundaryDetailKey(detail)) || null;
+        const getCountryBoundaryError = (detail = state?.config?.countryBoundaryDetail) => countryGeometryErrors.get(getCountryBoundaryDetailKey(detail)) || '';
+        const resolveCountryEntry = (...values) => {
+            const activeIndex = getActiveCountryGeometryIndex();
+            if (!activeIndex?.lookup) return null;
+            for (const value of values) {
+                const code = normalizeCountryCode(value);
+                if (code && activeIndex.lookup.has(code)) return activeIndex.lookup.get(code);
+                const name = normalizeCountryName(value);
+                if (name && activeIndex.lookup.has(name)) return activeIndex.lookup.get(name);
+                const upper = String(value || '').trim().toUpperCase();
+                if (upper && activeIndex.lookup.has(upper)) return activeIndex.lookup.get(upper);
+            }
+            return null;
+        };
+        const findCountryEntryForPoint = (lat, lon) => {
+            const activeIndex = getActiveCountryGeometryIndex();
+            if (!activeIndex?.features?.length || !Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+            for (const entry of activeIndex.features) {
+                if (!isPointInBBox(lon, lat, entry.bbox)) continue;
+                for (const polygon of entry.polygons) {
+                    if (!isPointInBBox(lon, lat, polygon.bbox)) continue;
+                    if (polygonContainsPoint(lon, lat, polygon.rings)) return entry;
+                }
+            }
+            return null;
+        };
+        const applyCountryMetadataToLocation = (loc, entry = null) => {
+            const fallbackCode = normalizeCountryCode(loc?.countryCode || loc?.country_code);
+            const fallbackName = String(loc?.countryName || '').trim();
+            const nextKey = entry?.key || fallbackCode || normalizeCountryName(fallbackName) || null;
+            const nextCode = entry?.code || fallbackCode || null;
+            const nextName = entry?.name || fallbackName || null;
+            const changed = loc.countryKey !== nextKey || loc.countryCode !== nextCode || loc.countryName !== nextName;
+            loc.countryKey = nextKey;
+            loc.countryCode = nextCode;
+            loc.countryName = nextName;
+            return changed;
+        };
+        const annotateLocationsWithCountries = () => {
+            if (!Array.isArray(state?.locationsData?.locations) || !state.locationsData.locations.length) return false;
+            let changed = false;
+            state.locationsData.locations.forEach(loc => {
+                const resolvedEntry = findCountryEntryForPoint(Number(loc?.lat), Number(loc?.lon))
+                    || resolveCountryEntry(loc?.countryCode, loc?.countryName, loc?.detail);
+                changed = applyCountryMetadataToLocation(loc, resolvedEntry) || changed;
+            });
+            return changed;
+        };
+        const getCountryBoundaryStatus = (detail = state?.config?.countryBoundaryDetail) => {
+            const key = getCountryBoundaryDetailKey(detail);
+            if (countryGeometryCache.has(key)) return 'ready';
+            if (countryGeometryPromises.has(key)) return 'loading';
+            if (countryGeometryErrors.has(key)) return 'error';
+            return 'idle';
+        };
+        const ensureCountryGeometryIndex = async (detail = state?.config?.countryBoundaryDetail) => {
+            const key = getCountryBoundaryDetailKey(detail);
+            const source = getCountryBoundarySource(detail);
+            if (countryGeometryCache.has(key)) return countryGeometryCache.get(key);
+            if (countryGeometryPromises.has(key)) return countryGeometryPromises.get(key);
+            countryGeometryErrors.delete(key);
+            const promise = fetch(source.url, { cache: 'force-cache' })
+                .then(async response => {
+                    if (!response.ok) throw new Error(`Country outlines failed to load (${response.status}).`);
+                    return response.json();
+                })
+                .then(geojson => {
+                    const index = buildCountryGeometryIndex(geojson);
+                    if (!index.features.length) throw new Error('Country outlines did not include any usable features.');
+                    countryGeometryCache.set(key, index);
+                    countryGeometryPromises.delete(key);
+                    return index;
+                })
+                .catch(err => {
+                    countryGeometryPromises.delete(key);
+                    countryGeometryErrors.set(key, err instanceof Error ? err.message : String(err || 'Unknown error'));
+                    throw err;
+                });
+            countryGeometryPromises.set(key, promise);
+            return promise;
+        };
+        const syncCountryVisualization = () => {
+            if (state.config.countryDisplayMode === 'off') return;
+            const previousStatus = getCountryBoundaryStatus();
+            ensureCountryGeometryIndex()
+                .then(() => {
+                    annotateLocationsWithCountries();
+                    updateSidebar();
+                    drawMapData();
+                })
+                .catch(() => updateSidebar());
+            if (previousStatus !== 'loading' && getCountryBoundaryStatus() === 'loading') updateSidebar();
+        };
         const getLocationBounds = locs => {
             const pts = locs.filter(l => Number.isFinite(l?.lat) && Number.isFinite(l?.lon)).map(l => [l.lat, l.lon]);
             return pts.length ? L.latLngBounds(pts) : null;
@@ -185,7 +434,56 @@
             if (currentPath.length > 1) groundPaths.push(currentPath);
             return { groundPaths, flightPaths };
         };
+        const getVisibleCountryEntries = (locs = getVisibleLocations()) => {
+            const activeIndex = getActiveCountryGeometryIndex();
+            if (!activeIndex?.byKey?.size || !Array.isArray(locs) || !locs.length) return [];
+            const keys = new Set();
+            locs.forEach(loc => {
+                const key = String(loc?.countryKey || '').trim();
+                if (key) keys.add(key);
+            });
+            const startTime = Number.isFinite(Number(locs[0]?.time)) ? Number(locs[0].time) : Number.NEGATIVE_INFINITY;
+            const endTime = Number.isFinite(Number(locs[locs.length - 1]?.time)) ? Number(locs[locs.length - 1].time) : Number.POSITIVE_INFINITY;
+            if (Array.isArray(state.tripData?.all_steps)) {
+                state.tripData.all_steps.forEach(step => {
+                    const stepTime = Number.isFinite(Number(step?.start_time)) ? Number(step.start_time) : null;
+                    if (stepTime !== null && (stepTime < startTime || stepTime > endTime)) return;
+                    const entry = resolveCountryEntry(
+                        step?.location?.country_code,
+                        step?.location?.detail,
+                        step?.location?.full_detail,
+                        step?.location?.name
+                    );
+                    if (entry?.key) keys.add(entry.key);
+                });
+            }
+            return [...keys].map(key => activeIndex.byKey.get(key)).filter(Boolean);
+        };
+        const getCountryLayerStyle = () => {
+            const outlinesOnly = state.config.countryDisplayMode === 'outlines';
+            return {
+                color: state.config.countryOutlineColor,
+                weight: state.config.countryOutlineWidth,
+                opacity: state.config.countryOutlineOpacity,
+                fillColor: state.config.countryFillColor,
+                fillOpacity: outlinesOnly ? 0 : state.config.countryFillOpacity,
+                renderer: canvasRenderer
+            };
+        };
         const getTimelinePercent = (value) => state.totalPoints ? (value / state.totalPoints) * 100 : 0;
+        const syncCountryLoadingIndicator = () => {
+            const indicator = document.getElementById('country-loading-indicator');
+            const label = document.getElementById('country-loading-text');
+            if (!indicator || !label) return;
+            const source = getCountryBoundarySource();
+            const shouldShow = !!state?.tripData && state.config.countryDisplayMode !== 'off' && getCountryBoundaryStatus() === 'loading';
+            if (shouldShow) {
+                label.textContent = `Loading ${source.label.toLowerCase()}-detail country boundaries...`;
+                indicator.classList.remove('hidden');
+            } else {
+                indicator.classList.add('hidden');
+            }
+        };
         const syncTimelineControls = () => {
             const highlight = document.querySelector('[data-timeline-highlight]');
             if (highlight) {
@@ -289,6 +587,7 @@
         const initialConfig = {
             tileProvider: 'carto_light', mapLabels: true, mapOpacity: 1, mapSaturation: 100,
             mapBackgroundMode: 'auto', mapBackgroundColor: '#ffffff',
+            countryDisplayMode: 'off', countryBoundaryDetail: 'medium', countryOutlineColor: '#000000', countryOutlineWidth: 1.5, countryOutlineOpacity: 1, countryFillColor: '#ffffff', countryFillOpacity: 1,
             routeColor: '#3b82f6', routeWidth: 3, routeOpacity: 1,
             detectFlights: true, flightThreshold: 500, flightColor: '#f97316', flightOpacity: 1,
             showSteps: false, stepColor: '#ef4444', stepRadius: 4, stepOpacity: 1, showStepLabels: false, stepLabelMode: 'name', stepLabelSize: 12,
@@ -303,7 +602,10 @@
             config: { ...initialConfig }, hasAutoFit: false
         };
 
-        let map, tileLayer, routeLayer, flightLayer, markerLayer, canvasRenderer;
+        let map, tileLayer, countryLayer, routeLayer, flightLayer, markerLayer, canvasRenderer;
+        const countryGeometryCache = new Map();
+        const countryGeometryPromises = new Map();
+        const countryGeometryErrors = new Map();
 
         // --- UI Rendering ---
         const updateSidebar = () => {
@@ -333,6 +635,7 @@
                         ${state.error ? `<p class="text-red-400 text-xs px-4 py-2 bg-red-900/30 rounded">${state.error}</p>` : ''}
                     </div>
                 `;
+                syncCountryLoadingIndicator();
                 return;
             }
 
@@ -366,6 +669,9 @@
             const hasStepData = Array.isArray(state.tripData?.all_steps) && state.tripData.all_steps.length > 0;
             const totalKm = Number.isFinite(Number(state.tripData?.total_km)) ? Number(state.tripData.total_km) : calculateTotalKm(state.locationsData?.locations || []);
             const summaryCount = hasStepData ? `${state.tripData.all_steps.length} steps` : `${state.totalPoints} points`;
+            const countryStatus = getCountryBoundaryStatus();
+            const visibleCountryCount = countryStatus === 'ready' ? getVisibleCountryEntries().length : 0;
+            const countryDetail = getCountryBoundarySource();
 
             let timelineBody = `
                 <div class="py-2 space-y-2">
@@ -388,6 +694,7 @@
                         ${['carto_light', 'carto_dark', 'osm', 'satellite'].map(p => `<button onclick="updateConfig('tileProvider', '${p}')" class="text-xs p-2 rounded border ${state.config.tileProvider===p?'bg-blue-600 border-blue-500 text-white':'bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600'}">${p.replace('_',' ').toUpperCase()}</button>`).join('')}
                     </div>
                 </div>
+                ${state.config.countryDisplayMode === 'only' ? `<div class="text-[11px] text-amber-300 bg-amber-950/20 border border-amber-900/40 rounded px-3 py-2">Countries Only hides the raster basemap and keeps the selected country shapes behind your route.</div>` : ''}
                 ${renderCheck('mapLabels', 'Show Map Labels')}
                 <div class="space-y-4 pt-2 border-t border-gray-700">
                     ${renderSlider('opacity', 'mapOpacity', 'Opacity', 0, 1, 0.1)}
@@ -395,6 +702,22 @@
                     ${renderButtonGroup('mapBackgroundMode', 'Background', [['Auto', 'auto'], ['Custom', 'custom'], ['Transparent', 'transparent']], 3)}
                     ${state.config.mapBackgroundMode === 'custom' ? renderColor('mapBackgroundColor', 'Background Color') : ''}
                 </div>`;
+
+            let countryBody = `
+                ${renderButtonGroup('countryDisplayMode', 'Country Layer', [['Off', 'off'], ['Outlines', 'outlines'], ['Countries Only', 'only']], 3)}
+                ${state.config.countryDisplayMode !== 'off' ? `
+                    <div class="space-y-4 pt-2 border-t border-gray-700">
+                        ${renderButtonGroup('countryBoundaryDetail', 'Boundary Detail', [['Low', 'low'], ['Medium', 'medium'], ['High', 'high']], 3)}
+                        <div class="text-[11px] text-gray-400 bg-gray-800/70 border border-gray-700 rounded px-3 py-2">${countryDetail.label} detail uses Natural Earth ${countryDetail.resolution} boundaries. ${countryDetail.description}.</div>
+                        ${renderColor('countryOutlineColor', 'Outline Color')}
+                        ${renderSlider('countryOutlineWidth', 'countryOutlineWidth', 'Outline Width', 0.5, 5, 0.5, 'px')}
+                        ${renderSlider('countryOutlineOpacity', 'countryOutlineOpacity', 'Outline Opacity', 0, 1, 0.05)}
+                        ${state.config.countryDisplayMode === 'only' ? `${renderColor('countryFillColor', 'Fill Color')}${renderSlider('countryFillOpacity', 'countryFillOpacity', 'Fill Opacity', 0, 1, 0.05)}` : ''}
+                    </div>
+                ` : `<div class="text-sm text-gray-400 bg-gray-800/70 border border-gray-700 rounded p-3">Highlight just the countries touched by the currently visible trip segment.</div>`}
+                ${state.config.countryDisplayMode !== 'off' && countryStatus === 'loading' ? `<div class="text-[11px] text-blue-300 bg-blue-950/30 border border-blue-900/40 rounded px-3 py-2">Loading ${countryDetail.label.toLowerCase()}-detail Natural Earth country boundaries…</div>` : ''}
+                ${state.config.countryDisplayMode !== 'off' && countryStatus === 'error' ? `<div class="text-[11px] text-red-300 bg-red-950/30 border border-red-900/40 rounded px-3 py-2">${escapeHtml(getCountryBoundaryError() || 'Country boundaries could not be loaded.')}</div>` : ''}
+                ${state.config.countryDisplayMode !== 'off' && countryStatus === 'ready' ? `<div class="text-[11px] ${visibleCountryCount ? 'text-emerald-300 bg-emerald-950/20 border-emerald-900/40' : 'text-gray-300 bg-gray-800/70 border-gray-700'} border rounded px-3 py-2">${visibleCountryCount ? `${visibleCountryCount} visible countr${visibleCountryCount === 1 ? 'y' : 'ies'} matched from step data and route points.` : 'No countries matched the currently visible timeline range.'}</div>` : ''}`;
 
             let routeBody = `
                 <div class="space-y-4">
@@ -470,6 +793,7 @@
                     </div>
                     <div class="border-b border-gray-700">${accHeader('timeline', 'Timeline & Crop', 'clock')}${accBody('timeline', timelineBody)}</div>
                     <div class="border-b border-gray-700">${accHeader('style', 'Map Style', 'image')}${accBody('style', styleBody)}</div>
+                    <div class="border-b border-gray-700">${accHeader('countries', 'Countries', 'map')}${accBody('countries', countryBody)}</div>
                     <div class="border-b border-gray-700">${accHeader('route', 'Route & Flights', 'map')}${accBody('route', routeBody)}</div>
                     <div class="border-b border-gray-700">${accHeader('markers', 'Steps & Markers', 'settings')}${accBody('markers', markersBody)}</div>
                     <div class="border-b border-gray-700">${accHeader('export', 'Export Image', 'download')}${accBody('export', exportBody)}</div>
@@ -480,6 +804,7 @@
                     </div>
                 </div>`;
             
+            syncCountryLoadingIndicator();
             syncCropFrame();
         };
 
@@ -496,6 +821,7 @@
             else syncCropFrame();
             updateMapOptions();
             drawMapData();
+            if ((prop === 'countryDisplayMode' && val !== 'off') || (prop === 'countryBoundaryDetail' && state.config.countryDisplayMode !== 'off')) syncCountryVisualization();
         };
         window.updateTimeline = (idx, val, refreshSidebar=true) => {
             const limit = idx === 0 ? Math.min(val, state.timeline[1]-1) : Math.max(val, state.timeline[0]+1);
@@ -507,6 +833,7 @@
         window.resetConfig = () => { state.config = {...initialConfig}; updateSidebar(); updateMapOptions(); drawMapData(); };
         window.resetTrip = () => {
             Object.values(state.photos).flat().forEach(u => URL.revokeObjectURL(u));
+            if(countryLayer) countryLayer.clearLayers();
             if(routeLayer) routeLayer.clearLayers();
             if(flightLayer) flightLayer.clearLayers();
             if(markerLayer) markerLayer.clearLayers();
@@ -551,17 +878,20 @@
                 state.timeline = [0, resolvedLocationsData.locations.length];
                 state.openAccordion = 'style';
                 state.hasAutoFit = false;
+                if (getActiveCountryGeometryIndex()) annotateLocationsWithCountries();
             } catch(err) {
                 Object.values(newPhotos).flat().forEach(u => URL.revokeObjectURL(u));
                 state.error = err.message;
             }
             state.loading = false; updateSidebar(); updateMapOptions(); drawMapData();
+            if (state.config.countryDisplayMode !== 'off') syncCountryVisualization();
         };
 
         // --- Map Lifecycle ---
         const initMap = () => {
             map = L.map('map-container', { zoomControl: false, attributionControl: false, preferCanvas: true }).setView([0,0], 2);
             canvasRenderer = L.canvas({ padding: 0.5 });
+            countryLayer = L.featureGroup().addTo(map);
             routeLayer = L.featureGroup().addTo(map);
             flightLayer = L.featureGroup().addTo(map);
             markerLayer = L.featureGroup().addTo(map);
@@ -573,6 +903,7 @@
         const updateMapOptions = () => {
             if(!map) return;
             if(tileLayer) map.removeLayer(tileLayer);
+            tileLayer = null;
             const mapContainer = document.getElementById('map-container');
             mapContainer.style.setProperty('--label-size', state.config.stepLabelSize + 'px');
             mapContainer.style.setProperty('--map-background', getMapBackgroundValue());
@@ -584,16 +915,36 @@
                 if(p==='satellite') return 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
                 return `https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png`;
             };
+            if (state.config.countryDisplayMode === 'only') return;
             tileLayer = L.tileLayer(getUrl(state.config.tileProvider, state.config.mapLabels), { opacity: state.config.mapOpacity, crossOrigin: 'anonymous', maxZoom: 19 }).addTo(map);
             tileLayer.on('load', () => { const c = tileLayer.getContainer(); if(c) c.style.filter = `saturate(${state.config.mapSaturation}%)`; });
         };
 
         const drawMapData = () => {
             if(!map) return;
+            if(countryLayer) countryLayer.clearLayers();
             routeLayer.clearLayers(); flightLayer.clearLayers(); markerLayer.clearLayers();
             if(!state.tripData || !state.locationsData) return;
             const locs = getVisibleLocations();
             if(!locs.length) return;
+
+            if (state.config.countryDisplayMode !== 'off') {
+                if (getActiveCountryGeometryIndex()?.features?.length) {
+                    const countryEntries = getVisibleCountryEntries(locs);
+                    if (countryEntries.length) {
+                        const geo = L.geoJSON(countryEntries.map(entry => entry.feature), {
+                            style: () => getCountryLayerStyle()
+                        });
+                        geo.eachLayer(layer => {
+                            layer.options._vectorRole = 'country';
+                            countryLayer.addLayer(layer);
+                            if (layer.bringToBack) layer.bringToBack();
+                        });
+                    }
+                } else if (getCountryBoundaryStatus() !== 'loading') {
+                    syncCountryVisualization();
+                }
+            }
 
             const { groundPaths: gp, flightPaths: fp } = getRouteSegments(locs);
 
@@ -715,7 +1066,8 @@
             const exportBackground = getExportBackgroundValue();
 
             const scaleL = (g) => g.eachLayer(l => {
-                if(l instanceof L.Polyline) l.setStyle({ weight: state.config.routeWidth * scale });
+                if(l.options?._vectorRole === 'country') l.setStyle({ weight: state.config.countryOutlineWidth * scale });
+                else if(l instanceof L.Polyline) l.setStyle({ weight: state.config.routeWidth * scale });
                 if(l instanceof L.CircleMarker) l.setRadius(state.config.stepRadius * scale);
                 if(l instanceof L.Marker && l.options._type === 'photo') {
                     const s = state.config.photoMarkerSize * scale;
@@ -724,7 +1076,7 @@
                 if(l.getTooltip()) l.bindTooltip(l.getTooltip().getContent(), {...l.getTooltip().options, offset: [0, (l instanceof L.Marker ? -(state.config.photoMarkerSize*scale/2) : -10*scale)]});
             });
 
-            scaleL(routeLayer); scaleL(flightLayer); scaleL(markerLayer);
+            scaleL(countryLayer); scaleL(routeLayer); scaleL(flightLayer); scaleL(markerLayer);
             mc.style.setProperty('--label-size', `${state.config.stepLabelSize * scale}px`);
             mc.style.setProperty('--map-background', getMapBackgroundValue());
             
@@ -740,7 +1092,8 @@
             map.invalidateSize(); mc.style.setProperty('--label-size', `${state.config.stepLabelSize}px`);
             
             const restL = (g) => g.eachLayer(l => {
-                if(l instanceof L.Polyline) l.setStyle({ weight: state.config.routeWidth });
+                if(l.options?._vectorRole === 'country') l.setStyle({ weight: state.config.countryOutlineWidth });
+                else if(l instanceof L.Polyline) l.setStyle({ weight: state.config.routeWidth });
                 if(l instanceof L.CircleMarker) l.setRadius(state.config.stepRadius);
                 if(l instanceof L.Marker && l.options._type === 'photo') {
                     const s = state.config.photoMarkerSize;
@@ -748,7 +1101,7 @@
                 }
                 if(l.getTooltip()) l.bindTooltip(l.getTooltip().getContent(), {...l.getTooltip().options, offset: [0, (l instanceof L.Marker ? -(state.config.photoMarkerSize/2) : -10)]});
             });
-            restL(routeLayer); restL(flightLayer); restL(markerLayer);
+            restL(countryLayer); restL(routeLayer); restL(flightLayer); restL(markerLayer);
 
             map.setView(origCenter, origZoom, {animate:false});
             state.loading = false; document.getElementById('loading').classList.add('hidden'); updateSidebar();

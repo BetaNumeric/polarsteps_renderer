@@ -8,6 +8,7 @@ A small browser-based tool for turning an exported Polarsteps trip into a custom
 
 - Load a full exported Polarsteps trip folder, just `locations.json`, or just `trip.json`, directly in the browser
 - Render the trip route on different base maps
+- Show only the countries touched by the visible route, either as outlines or as filled country shapes
 - Adjust map labels, opacity, saturation, contrast, and background color
 - Show steps as markers or photo thumbnails, with optional place-name or step-number labels
 - Detect long jumps as flights and style them separately
@@ -43,3 +44,5 @@ According to Polarsteps, the export includes a `user_data/trip` area with one fo
 ## Local Use
 
 This repository is a single static page. There is no backend or build step required for basic use.
+
+The optional country layer loads a simplified Natural Earth boundary dataset in the browser when that mode is enabled, with selectable low/medium/high boundary detail.
