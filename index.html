@@ -277,10 +277,22 @@
             if (!polygons.length) return null;
             const code = getCountryFeatureCode(props);
             const name = getCountryFeatureName(props);
-            const key = code || normalizeCountryName(name);
-            if (!key) return null;
+            const groupKey = code || normalizeCountryName(name);
+            if (!groupKey) return null;
+            const idSeed = [
+                props?.NE_ID,
+                props?.WIKIDATAID,
+                props?.ADM0_A3,
+                props?.ISO_A3_EH,
+                props?.ISO_A3,
+                props?.BRK_A3,
+                Array.isArray(feature?.bbox) ? feature.bbox.join(',') : ''
+            ].find(v => String(v || '').trim()) || name;
+            const featureKey = `${groupKey}::${String(idSeed).trim()}`;
             return {
-                key,
+                key: groupKey,
+                groupKey,
+                featureKey,
                 code,
                 name,
                 bbox: Array.isArray(feature?.bbox) && feature.bbox.length === 4 ? feature.bbox : getGeometryBBox(geometry),
@@ -289,7 +301,9 @@
                     ...feature,
                     properties: {
                         ...props,
-                        __countryKey: key,
+                        __countryKey: groupKey,
+                        __countryGroupKey: groupKey,
+                        __countryFeatureKey: featureKey,
                         __countryCode: code,
                         __countryName: name
                     }
@@ -300,14 +314,17 @@
         const buildCountryGeometryIndex = geojson => {
             const features = Array.isArray(geojson?.features) ? geojson.features.map(createCountryFeatureEntry).filter(Boolean) : [];
             const byKey = new Map();
+            const byFeatureKey = new Map();
             const lookup = new Map();
             features.forEach(entry => {
-                byKey.set(entry.key, entry);
+                if (!byKey.has(entry.groupKey)) byKey.set(entry.groupKey, []);
+                byKey.get(entry.groupKey).push(entry);
+                byFeatureKey.set(entry.featureKey, entry);
                 entry.lookupKeys.forEach(alias => {
                     if (alias && !lookup.has(alias)) lookup.set(alias, entry);
                 });
             });
-            return { features, byKey, lookup };
+            return { features, byKey, byFeatureKey, lookup };
         };
         const getActiveCountryGeometryIndex = (detail = state?.config?.countryBoundaryDetail) => countryGeometryCache.get(getCountryBoundaryDetailKey(detail)) || null;
         const getCountryBoundaryError = (detail = state?.config?.countryBoundaryDetail) => countryGeometryErrors.get(getCountryBoundaryDetailKey(detail)) || '';
@@ -340,10 +357,12 @@
             const fallbackCode = normalizeCountryCode(loc?.countryCode || loc?.country_code);
             const fallbackName = String(loc?.countryName || '').trim();
             const nextKey = entry?.key || fallbackCode || normalizeCountryName(fallbackName) || null;
+            const nextFeatureKey = entry?.featureKey || null;
             const nextCode = entry?.code || fallbackCode || null;
             const nextName = entry?.name || fallbackName || null;
-            const changed = loc.countryKey !== nextKey || loc.countryCode !== nextCode || loc.countryName !== nextName;
+            const changed = loc.countryKey !== nextKey || loc.countryFeatureKey !== nextFeatureKey || loc.countryCode !== nextCode || loc.countryName !== nextName;
             loc.countryKey = nextKey;
+            loc.countryFeatureKey = nextFeatureKey;
             loc.countryCode = nextCode;
             loc.countryName = nextName;
             return changed;
@@ -436,11 +455,14 @@
         };
         const getVisibleCountryEntries = (locs = getVisibleLocations()) => {
             const activeIndex = getActiveCountryGeometryIndex();
-            if (!activeIndex?.byKey?.size || !Array.isArray(locs) || !locs.length) return [];
-            const keys = new Set();
+            if (!activeIndex?.byFeatureKey?.size || !Array.isArray(locs) || !locs.length) return [];
+            const featureKeys = new Set();
+            const groupKeys = new Set();
             locs.forEach(loc => {
-                const key = String(loc?.countryKey || '').trim();
-                if (key) keys.add(key);
+                const featureKey = String(loc?.countryFeatureKey || '').trim();
+                const groupKey = String(loc?.countryKey || '').trim();
+                if (featureKey) featureKeys.add(featureKey);
+                else if (groupKey) groupKeys.add(groupKey);
             });
             const startTime = Number.isFinite(Number(locs[0]?.time)) ? Number(locs[0].time) : Number.NEGATIVE_INFINITY;
             const endTime = Number.isFinite(Number(locs[locs.length - 1]?.time)) ? Number(locs[locs.length - 1].time) : Number.POSITIVE_INFINITY;
@@ -454,10 +476,29 @@
                         step?.location?.full_detail,
                         step?.location?.name
                     );
-                    if (entry?.key) keys.add(entry.key);
+                    if (entry?.featureKey) featureKeys.add(entry.featureKey);
+                    else if (entry?.groupKey) groupKeys.add(entry.groupKey);
                 });
             }
-            return [...keys].map(key => activeIndex.byKey.get(key)).filter(Boolean);
+            const entries = [];
+            const seen = new Set();
+            featureKeys.forEach(featureKey => {
+                const entry = activeIndex.byFeatureKey.get(featureKey);
+                if (entry && !seen.has(entry.featureKey)) {
+                    seen.add(entry.featureKey);
+                    entries.push(entry);
+                }
+            });
+            groupKeys.forEach(groupKey => {
+                const groupedEntries = activeIndex.byKey.get(groupKey) || [];
+                groupedEntries.forEach(entry => {
+                    if (entry && !seen.has(entry.featureKey)) {
+                        seen.add(entry.featureKey);
+                        entries.push(entry);
+                    }
+                });
+            });
+            return entries;
         };
         const getCountryLayerStyle = () => {
             const outlinesOnly = state.config.countryDisplayMode === 'outlines';
